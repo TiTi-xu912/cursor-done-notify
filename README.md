@@ -4,14 +4,33 @@ A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent tu
 
 点点是 Cursor Agent 的 Windows 桌面伙伴。Agent 开始干活后，它出现在桌面右下角，跟着读文件、改代码、跑命令换动作；这一轮结束、中断或出错时响一声，并带上回答摘要。多个对话同时进行时，它收成一张总览。
 
-![空闲](sprites/poses/idle.gif)
-![思考](sprites/poses/think.gif)
-![读取](sprites/poses/read.gif)
-![修改](sprites/poses/write.gif)
-![命令](sprites/poses/terminal.gif)
-![搜索](sprites/poses/search.gif)
-![完成](sprites/poses/done.gif)
-![出错](sprites/poses/error.gif)
+## 效果
+
+窗口本身是透明的，贴在桌面右下角。
+
+| 正在思考 | 正在读取 | 正在执行命令 |
+| --- | --- | --- |
+| <img src="docs/screenshots/think.png" width="240" alt="正在思考"> | <img src="docs/screenshots/read.png" width="240" alt="正在读取"> | <img src="docs/screenshots/terminal.png" width="240" alt="正在执行命令"> |
+
+| 正在修改 | 正在搜索 | 点开最近步骤 |
+| --- | --- | --- |
+| <img src="docs/screenshots/write.png" width="240" alt="正在修改"> | <img src="docs/screenshots/search.png" width="240" alt="正在搜索"> | <img src="docs/screenshots/steps.png" width="240" alt="展开步骤"> |
+
+| 回答结束 | 这一轮出错 | 多个会话 |
+| --- | --- | --- |
+| <img src="docs/screenshots/done.png" width="240" alt="回答结束"> | <img src="docs/screenshots/error.png" width="240" alt="出错"> | <img src="docs/screenshots/board.png" width="240" alt="多个会话"> |
+
+## 动作
+
+每个状态各有一段循环动画。
+
+| 空闲 | 思考 | 读取 | 修改 |
+| --- | --- | --- | --- |
+| <img src="sprites/poses/idle.gif" width="120" alt="空闲"> | <img src="sprites/poses/think.gif" width="120" alt="思考"> | <img src="sprites/poses/read.gif" width="120" alt="读取"> | <img src="sprites/poses/write.gif" width="120" alt="修改"> |
+
+| 命令 | 搜索 | 完成 | 出错 |
+| --- | --- | --- | --- |
+| <img src="sprites/poses/terminal.gif" width="120" alt="命令"> | <img src="sprites/poses/search.gif" width="120" alt="搜索"> | <img src="sprites/poses/done.gif" width="120" alt="完成"> | <img src="sprites/poses/error.gif" width="120" alt="出错"> |
 
 这是一个非官方工具，和 Cursor 没有隶属关系。
 
