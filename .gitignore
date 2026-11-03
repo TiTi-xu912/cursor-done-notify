@@ -1,0 +1,8 @@
+# install.ps1 compiles these from HookRelay.cs and BuddyForm.cs
+hook-relay.exe
+BuddyForm.dll
+
+.vs/
+*.user
+Thumbs.db
+Desktop.ini
