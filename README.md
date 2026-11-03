@@ -51,7 +51,17 @@ A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent tu
 
 安装程序写入的是用户级配置 `%USERPROFILE%\.cursor\hooks.json`。原来已经存在的其他 hook 会保留，只会换掉点点自己的条目。
 
-这些 hook 只负责把状态告诉点点。`beforeSubmitPrompt` 固定回答继续，`preToolUse` 和 `subagentStart` 固定回答允许，不会替你拦截工具。
+双击安装默认使用**安全模式**：不注册需要返回权限决定的 Hook，因此不会替 Cursor 允许工具执行；读、写、搜索和命令动作会在相应工具完成后显示。
+
+如果希望动作从工具开始时就实时变化，可以显式启用实时模式：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnableRealtime
+```
+
+实时模式会注册 `preToolUse` 和 `subagentStart`，并按照 Cursor Hook 协议返回 `permission: "allow"`。这会参与 Cursor 的工具权限决策，只应在你理解并接受这一行为时启用。重新运行普通的 `install.cmd` 会切回安全模式。
+
+更新配置前会在同目录保留一份 `hooks.json.bak`；写入使用临时文件替换，避免中途退出损坏配置。
 
 ## 使用
 
@@ -69,9 +79,15 @@ A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent tu
 [Environment]::SetEnvironmentVariable('CURSOR_NOTIFY_SECONDS', '20', 'User')
 ```
 
+如果 Cursor 意外退出，长时间收不到事件的会话默认会在 180 分钟后标成“会话失去连接”。可以通过 `CURSOR_NOTIFY_STALE_MINUTES` 调整为 10 到 1440 分钟：
+
+```powershell
+[Environment]::SetEnvironmentVariable('CURSOR_NOTIFY_STALE_MINUTES', '60', 'User')
+```
+
 ## 卸载
 
-双击 `uninstall.cmd`。它会关掉点点，并只从 `hooks.json` 里删掉点点的条目。然后完全退出 Cursor 再打开。
+双击 `uninstall.cmd`。它会关掉点点，只从 `hooks.json` 里删掉当前安装目录对应的条目，并清理临时事件、摘要和错误日志；窗口位置会保留。然后完全退出 Cursor 再打开。
 
 ## 它怎么工作
 
@@ -88,9 +104,9 @@ progress-host.ps1       按对话分开记状态
 BuddyForm.dll           画点点
 ```
 
-安装时注册的事件：`beforeSubmitPrompt`、`preToolUse`、`postToolUse`、`postToolUseFailure`、`afterAgentThought`、`afterAgentResponse`、`subagentStart`、`subagentStop`、`stop`。
+安全模式注册：`beforeSubmitPrompt`、`postToolUse`、`postToolUseFailure`、`afterAgentThought`、`afterAgentResponse`、`subagentStop`、`stop`。实时模式另外注册 `preToolUse` 和 `subagentStart`。
 
-事件只留在本机临时目录里。过长的提示、命令和回答会截短后再交给窗口。点点不会把这些内容发出去。
+事件只留在本机临时目录里。过长的提示、命令和回答会截短后再交给窗口，超过一天的残留事件会在下次启动时清理。点点不会把这些内容发出去。
 
 `notify-done.ps1` 是一个更早的纯文字弹窗，安装程序不会注册它。
 

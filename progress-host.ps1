@@ -20,6 +20,18 @@ function Get-StateDir {
     return (Join-Path $env:TEMP 'cursor-done-notify')
 }
 
+function Clear-StaleState {
+    $dir = Get-StateDir
+    $inbox = Join-Path $dir 'inbox'
+    if (Test-Path -LiteralPath $inbox) {
+        $cutoff = (Get-Date).AddDays(-1)
+        Get-ChildItem -LiteralPath $inbox -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt $cutoff } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath (Join-Path $dir 'live-view.txt') -Force -ErrorAction SilentlyContinue
+}
+
 function Shorten([string]$Text, [int]$Max) {
     if ([string]::IsNullOrWhiteSpace($Text)) {
         return ''
@@ -220,6 +232,9 @@ function Reset-Fields {
     $script:AnswerSeen = $false
     $script:OpenTools = 0
     $script:OpenSubagents = 0
+    $script:OpenToolIds = @{}
+    $script:CompletedToolIds = @{}
+    $script:RetiredGenerations = New-Object System.Collections.Generic.List[string]
     $script:GenerationId = ''
     $script:WorkspaceRoot = ''
     $script:UpdatedAt = Get-Date
@@ -233,11 +248,18 @@ function Initialize-State {
     if ($script:DoneSeconds -lt 3) { $script:DoneSeconds = 3 }
     if ($script:DoneSeconds -gt 60) { $script:DoneSeconds = 60 }
 
+    $script:StaleMinutes = 180
+    if ($env:CURSOR_NOTIFY_STALE_MINUTES -match '^\d+$') {
+        $script:StaleMinutes = [int]$env:CURSOR_NOTIFY_STALE_MINUTES
+    }
+    if ($script:StaleMinutes -lt 10) { $script:StaleMinutes = 10 }
+    if ($script:StaleMinutes -gt 1440) { $script:StaleMinutes = 1440 }
+
     $script:SessionFields = @(
         'Phase', 'Headline', 'Activity', 'Pose', 'Detail', 'Prompt', 'Project', 'Snippet', 'Accent',
         'StartedAt', 'StepStartedAt', 'Steps', 'History', 'DoneUntil', 'SettleUntil',
         'SoundPlayed', 'SoundPending', 'Summary', 'StopSeen', 'AnswerSeen', 'OpenTools', 'OpenSubagents',
-        'GenerationId', 'UpdatedAt', 'WorkspaceRoot'
+        'OpenToolIds', 'CompletedToolIds', 'RetiredGenerations', 'GenerationId', 'UpdatedAt', 'WorkspaceRoot'
     )
     $script:Sessions = @{}
     $script:SessionOrder = New-Object System.Collections.Generic.List[string]
@@ -259,6 +281,27 @@ function Export-SessionBag {
         }
     }
     $bag.History = $copy
+    $toolIds = @{}
+    if ($bag.OpenToolIds) {
+        foreach ($key in @($bag.OpenToolIds.Keys)) {
+            $toolIds[$key] = $true
+        }
+    }
+    $bag.OpenToolIds = $toolIds
+    $completedToolIds = @{}
+    if ($bag.CompletedToolIds) {
+        foreach ($key in @($bag.CompletedToolIds.Keys)) {
+            $completedToolIds[$key] = $true
+        }
+    }
+    $bag.CompletedToolIds = $completedToolIds
+    $retired = New-Object System.Collections.Generic.List[string]
+    if ($bag.RetiredGenerations) {
+        foreach ($generation in @($bag.RetiredGenerations)) {
+            $retired.Add([string]$generation) | Out-Null
+        }
+    }
+    $bag.RetiredGenerations = $retired
     return $bag
 }
 
@@ -268,6 +311,15 @@ function Import-SessionBag($Bag) {
     }
     if ($null -eq $script:History) {
         $script:History = New-Object System.Collections.Generic.List[string]
+    }
+    if ($null -eq $script:OpenToolIds) {
+        $script:OpenToolIds = @{}
+    }
+    if ($null -eq $script:CompletedToolIds) {
+        $script:CompletedToolIds = @{}
+    }
+    if ($null -eq $script:RetiredGenerations) {
+        $script:RetiredGenerations = New-Object System.Collections.Generic.List[string]
     }
 }
 
@@ -327,6 +379,8 @@ function Reset-Turn {
     $script:AnswerSeen = $false
     $script:OpenTools = 0
     $script:OpenSubagents = 0
+    $script:OpenToolIds = @{}
+    $script:CompletedToolIds = @{}
     $script:Accent = 'blue'
     $script:Summary = ''
     $script:Headline = '正在处理'
@@ -343,10 +397,8 @@ function Enter-Running {
     if ($script:StopSeen) {
         return
     }
-    if ($script:SoundPlayed) {
-        $script:SoundPlayed = $false
-        $script:SoundPending = $false
-    }
+    $script:SoundPlayed = $false
+    $script:SoundPending = $false
     $script:Phase = 'running'
     $script:SettleUntil = $null
     $script:DoneUntil = $null
@@ -394,6 +446,7 @@ function Complete-Turn([string]$Status) {
     $script:SettleUntil = $null
     $script:OpenTools = 0
     $script:OpenSubagents = 0
+    $script:OpenToolIds = @{}
     switch ($Status) {
         'aborted' {
             $script:Headline = '这一轮已中断'
@@ -427,6 +480,29 @@ function Complete-Turn([string]$Status) {
         $script:DoneUntil = (Get-Date).AddSeconds($script:DoneSeconds)
         $script:SoundPending = $true
     }
+    Add-RetiredGeneration $script:GenerationId
+    Add-History $script:Headline
+}
+
+function Expire-StaleTurn {
+    if ($script:Phase -eq 'done' -or $script:Phase -eq 'idle') {
+        return
+    }
+    $script:StopSeen = $true
+    $script:Phase = 'done'
+    $script:SettleUntil = $null
+    $script:OpenTools = 0
+    $script:OpenSubagents = 0
+    $script:OpenToolIds = @{}
+    $script:Headline = '会话失去连接'
+    $script:Activity = '长时间没有收到 Cursor 事件'
+    $script:Detail = ''
+    $script:Accent = 'orange'
+    $script:Pose = 'error'
+    $script:Summary = '最后活动于 ' + $script:UpdatedAt.ToString('HH:mm')
+    $script:DoneUntil = (Get-Date).AddSeconds($script:DoneSeconds)
+    $script:SoundPending = $false
+    Add-RetiredGeneration $script:GenerationId
     Add-History $script:Headline
 }
 
@@ -468,6 +544,11 @@ function Update-Lifecycle {
             Soft-Complete
             $script:UpdatedAt = Get-Date
         }
+        if (($script:Phase -eq 'running' -or $script:Phase -eq 'settling') -and
+            $script:UpdatedAt -and
+            (Get-Date) -ge $script:UpdatedAt.AddMinutes($script:StaleMinutes)) {
+            Expire-StaleTurn
+        }
         $script:Sessions[$key] = Export-SessionBag
     }
 }
@@ -486,6 +567,20 @@ function Trim-Sessions {
             }
         }
         if (-not $removed) { break }
+    }
+    while ($script:SessionOrder.Count -gt 16) {
+        $oldestKey = $null
+        $oldestAt = [datetime]::MaxValue
+        foreach ($key in @($script:SessionOrder)) {
+            $when = $script:Sessions[$key].UpdatedAt
+            if (-not $when) { $when = [datetime]::MinValue }
+            if ($when -lt $oldestAt) {
+                $oldestAt = $when
+                $oldestKey = $key
+            }
+        }
+        if (-not $oldestKey) { break }
+        Remove-Session $oldestKey
     }
 }
 
@@ -790,6 +885,34 @@ function Get-GenerationId($Payload, [string]$Raw) {
     return $gen
 }
 
+function Add-RetiredGeneration([string]$Generation) {
+    if ([string]::IsNullOrWhiteSpace($Generation)) {
+        return
+    }
+    if (-not $script:RetiredGenerations.Contains($Generation)) {
+        $script:RetiredGenerations.Add($Generation) | Out-Null
+    }
+    while ($script:RetiredGenerations.Count -gt 16) {
+        $script:RetiredGenerations.RemoveAt(0)
+    }
+}
+
+function Test-RetiredGeneration([string]$Generation) {
+    return (-not [string]::IsNullOrWhiteSpace($Generation) -and
+        $script:RetiredGenerations.Contains($Generation))
+}
+
+function Get-ToolUseId($Payload, [string]$Raw) {
+    $id = ''
+    if ($Payload -and $Payload.PSObject.Properties.Name -contains 'tool_use_id' -and $Payload.tool_use_id) {
+        $id = [string]$Payload.tool_use_id
+    }
+    if ([string]::IsNullOrWhiteSpace($id) -and $Raw) {
+        $id = Get-JsonField $Raw 'tool_use_id'
+    }
+    return $id
+}
+
 function Apply-Event($Payload, [string]$Raw) {
     $eventName = ''
     if ($Payload -and $Payload.hook_event_name) {
@@ -814,15 +937,30 @@ function Apply-Event($Payload, [string]$Raw) {
     }
 
     $gen = Get-GenerationId $Payload $Raw
-    $newGeneration = ($gen -and $script:GenerationId -and $gen -ne $script:GenerationId)
-    if (-not $script:StartedAt -and $eventName -ne 'beforeSubmitPrompt') {
-        Reset-Turn
+    if (Test-RetiredGeneration $gen) {
+        return
     }
-    if ($eventName -eq 'beforeSubmitPrompt' -or $newGeneration) {
+    if ($eventName -eq 'beforeSubmitPrompt') {
+        if ($gen -and $script:GenerationId -eq $gen -and $script:StartedAt -and -not $script:StopSeen) {
+            return
+        }
+        if ($gen -and $script:GenerationId -and $gen -ne $script:GenerationId) {
+            Add-RetiredGeneration $script:GenerationId
+        }
         Reset-Turn
-    }
-    if ($gen) {
-        $script:GenerationId = $gen
+        if ($gen) {
+            $script:GenerationId = $gen
+        }
+    } else {
+        if ($gen -and $script:GenerationId -and $gen -ne $script:GenerationId) {
+            return
+        }
+        if (-not $script:StartedAt) {
+            Reset-Turn
+        }
+        if ($gen -and -not $script:GenerationId) {
+            $script:GenerationId = $gen
+        }
     }
 
     # stop is the end of this generation. A late response or thought must not restart the ring.
@@ -836,6 +974,7 @@ function Apply-Event($Payload, [string]$Raw) {
     } elseif ($Raw) {
         $toolName = Get-JsonField $Raw 'tool_name'
     }
+    $toolUseId = Get-ToolUseId $Payload $Raw
 
     switch ($eventName) {
         'beforeSubmitPrompt' {
@@ -857,8 +996,17 @@ function Apply-Event($Payload, [string]$Raw) {
             Add-History $script:Activity
         }
         'preToolUse' {
+            if ($toolUseId) {
+                if ($script:CompletedToolIds.ContainsKey($toolUseId) -or
+                    $script:OpenToolIds.ContainsKey($toolUseId)) {
+                    return
+                }
+                $script:OpenToolIds[$toolUseId] = $true
+                $script:OpenTools = $script:OpenToolIds.Count
+            } else {
+                $script:OpenTools++
+            }
             $script:AnswerSeen = $false
-            $script:OpenTools++
             Enter-Running
             $script:Steps++
             $script:StepStartedAt = Get-Date
@@ -872,20 +1020,59 @@ function Apply-Event($Payload, [string]$Raw) {
             Add-History $historyLine
         }
         'postToolUse' {
-            if ($script:OpenTools -gt 0) { $script:OpenTools-- }
+            $hadOpenTool = $false
+            if ($toolUseId) {
+                if ($script:CompletedToolIds.ContainsKey($toolUseId)) {
+                    return
+                }
+                $hadOpenTool = $script:OpenToolIds.ContainsKey($toolUseId)
+                $script:OpenToolIds.Remove($toolUseId) | Out-Null
+                $script:CompletedToolIds[$toolUseId] = $true
+                $script:OpenTools = $script:OpenToolIds.Count
+            } elseif ($script:OpenTools -gt 0) {
+                $hadOpenTool = $true
+                $script:OpenTools--
+            }
+            if (-not $hadOpenTool) {
+                Enter-Running
+                $script:Steps++
+            }
             $script:StepStartedAt = Get-Date
             if ($toolName) {
+                $script:Pose = Get-ToolPose $toolName
                 $script:Activity = Get-ToolPhrase $toolName $true
             }
             $detail = Get-ToolDetail $Payload $Raw
             if ($detail) {
                 $script:Detail = $detail
             }
+            if (-not $hadOpenTool) {
+                $historyLine = $script:Activity
+                if ($script:Detail) {
+                    $historyLine = $historyLine + ' ' + $script:Detail
+                }
+                Add-History $historyLine
+            }
             Update-AnswerState
         }
         'postToolUseFailure' {
-            if ($script:OpenTools -gt 0) { $script:OpenTools-- }
+            $hadOpenTool = $false
+            if ($toolUseId) {
+                if ($script:CompletedToolIds.ContainsKey($toolUseId)) {
+                    return
+                }
+                $hadOpenTool = $script:OpenToolIds.ContainsKey($toolUseId)
+                $script:OpenToolIds.Remove($toolUseId) | Out-Null
+                $script:CompletedToolIds[$toolUseId] = $true
+                $script:OpenTools = $script:OpenToolIds.Count
+            } elseif ($script:OpenTools -gt 0) {
+                $hadOpenTool = $true
+                $script:OpenTools--
+            }
             Enter-Running
+            if (-not $hadOpenTool) {
+                $script:Steps++
+            }
             $script:Accent = 'orange'
             $message = ''
             if ($Payload -and $Payload.error_message) {
@@ -933,7 +1120,6 @@ function Apply-Event($Payload, [string]$Raw) {
         }
         'subagentStart' {
             $script:AnswerSeen = $false
-            $script:OpenSubagents++
             Enter-Running
             $script:Steps++
             $script:StepStartedAt = Get-Date
@@ -949,7 +1135,6 @@ function Apply-Event($Payload, [string]$Raw) {
             Add-History ($script:Activity + ' ' + $script:Detail)
         }
         'subagentStop' {
-            if ($script:OpenSubagents -gt 0) { $script:OpenSubagents-- }
             $script:StepStartedAt = Get-Date
             if ($script:AnswerSeen -and -not (Test-WorkOutstanding)) {
                 Update-AnswerState
@@ -1000,11 +1185,8 @@ function Read-Inbox {
         } catch {
             continue
         }
-        try {
-            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
-        } catch {
-        }
         if ([string]::IsNullOrWhiteSpace($raw)) {
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
             continue
         }
         $payload = $null
@@ -1013,13 +1195,21 @@ function Read-Inbox {
         } catch {
             $payload = $null
         }
+        $applied = $false
         try {
             Apply-Event $payload $raw
+            $applied = $true
         } catch {
             try {
                 Write-Utf8File (Join-Path (Get-StateDir) 'last-error.txt') ($_ | Out-String)
             } catch {
             }
+        }
+        if ($applied) {
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+        } else {
+            $failed = [System.IO.Path]::ChangeExtension($file.FullName, '.failed')
+            Move-Item -LiteralPath $file.FullName -Destination $failed -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -1030,7 +1220,7 @@ function Write-LiveView {
         [string]$script:Steps,
         [string]$script:Headline,
         [string]$script:Activity,
-        [string]$script:Detail
+        ''
     ) -join '|'
     try {
         Write-Utf8File (Join-Path (Get-StateDir) 'live-view.txt') $line
@@ -1131,12 +1321,59 @@ if ($env:CURSOR_NOTIFY_SELFTEST -eq '1') {
 
     Apply-Event ([pscustomobject]@{ hook_event_name = 'preToolUse'; generation_id = 'g2'; tool_name = 'Grep' }) ''
     Assert-Phase 'resume after soft done' 'running'
+    if ($script:SoundPending) { throw 'resumed work kept a pending completion sound' }
+
+    Initialize-State
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; generation_id = 'tool-ids'; prompt = '工具去重' }) ''
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'preToolUse'; generation_id = 'tool-ids'; tool_name = 'Read'; tool_use_id = 't1' }) ''
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'preToolUse'; generation_id = 'tool-ids'; tool_name = 'Read'; tool_use_id = 't1' }) ''
+    if ($script:OpenTools -ne 1 -or $script:Steps -ne 1) { throw 'duplicate tool start was counted twice' }
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'postToolUse'; generation_id = 'tool-ids'; tool_name = 'Read'; tool_use_id = 't1' }) ''
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'postToolUse'; generation_id = 'tool-ids'; tool_name = 'Read'; tool_use_id = 't1' }) ''
+    if ($script:OpenTools -ne 0 -or $script:Steps -ne 1) { throw 'duplicate tool stop changed tool state' }
+
+    Initialize-State
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'late-pre'; generation_id = 'late-pre-g'; prompt = '迟到事件' }) ''
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'preToolUse'; conversation_id = 'late-pre'; generation_id = 'late-pre-g'; tool_name = 'Read'; tool_use_id = 'late-t1' }) ''
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'afterAgentResponse'; conversation_id = 'late-pre'; generation_id = 'late-pre-g'; text = '回答已写好' }) ''
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'preToolUse'; conversation_id = 'late-pre'; generation_id = 'late-pre-g'; tool_name = 'Read'; tool_use_id = 'late-t1' }) ''
+    if (-not $script:AnswerSeen) { throw 'duplicate tool start cleared a completed answer' }
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'postToolUse'; conversation_id = 'late-pre'; generation_id = 'late-pre-g'; tool_name = 'Read'; tool_use_id = 'late-t1' }) ''
+    Assert-Phase 'duplicate start after answer' 'settling'
+
+    Initialize-State
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'safe'; generation_id = 'safe-g'; prompt = '安全模式' }) ''
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'postToolUseFailure'; conversation_id = 'safe'; generation_id = 'safe-g'; tool_name = 'Shell'; tool_use_id = 'failed'; error_message = '失败' }) ''
+    if ($script:Accent -ne 'orange' -or $script:Steps -ne 1) { throw 'post-only failure was not counted' }
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'postToolUse'; conversation_id = 'safe'; generation_id = 'safe-g'; tool_name = 'Read'; tool_use_id = 'success'; file_path = 'safe.txt' }) ''
+    Assert-Phase 'post-only success' 'running'
+    if ($script:Accent -ne 'blue' -or $script:Steps -ne 2 -or $script:Pose -ne 'read') { throw 'post-only success kept stale state' }
+    if ((Get-HistoryText) -notmatch '已完成读取') { throw 'post-only success was not added to history' }
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'postToolUse'; conversation_id = 'safe'; generation_id = 'safe-g'; tool_name = 'Read'; tool_use_id = 'success'; file_path = 'safe.txt' }) ''
+    if ($script:Steps -ne 2) { throw 'duplicate post-only success was counted twice' }
+
+    Initialize-State
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'gen-chat'; generation_id = 'old-gen'; prompt = '旧轮次' }) ''
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'stop'; conversation_id = 'gen-chat'; generation_id = 'old-gen'; status = 'completed' }) ''
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'gen-chat'; generation_id = 'new-gen'; prompt = '新轮次' }) ''
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'postToolUse'; conversation_id = 'gen-chat'; generation_id = 'old-gen'; tool_name = 'Read' }) ''
+    Assert-Phase 'old generation ignored' 'running'
+    if ($script:GenerationId -ne 'new-gen') { throw 'old generation replaced active generation' }
 
     Initialize-State
     Apply-Event ([pscustomobject]@{ hook_event_name = 'stop'; generation_id = 'g3'; status = 'completed' }) ''
     Apply-Event ([pscustomobject]@{ hook_event_name = 'afterAgentResponse'; generation_id = 'g3'; text = 'out of order' }) ''
     Assert-Phase 'stop before response' 'done'
 
+    Initialize-State
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'stale'; generation_id = 'stale-g'; prompt = '失联测试' }) ''
+    $script:UpdatedAt = (Get-Date).AddMinutes(-($script:StaleMinutes + 1))
+    Save-CurrentSession
+    Update-Lifecycle
+    Assert-Phase 'stale session' 'done'
+    if ($script:Headline -ne '会话失去连接' -or $script:SoundPending) { throw 'stale session did not expire quietly' }
+
+    Initialize-State
     Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'chat-a'; generation_id = 'ga'; prompt = '修登录' }) ''
     Apply-Event ([pscustomobject]@{ hook_event_name = 'preToolUse'; conversation_id = 'chat-a'; generation_id = 'ga'; tool_name = 'Read'; file_path = 'login.cs' }) ''
     Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'chat-b'; generation_id = 'gb'; prompt = '看报表' }) ''
@@ -1197,6 +1434,7 @@ if ($env:CURSOR_NOTIFY_PREVIEW -eq '1') {
     exit 0
 }
 
+Clear-StaleState
 Initialize-State
 
 $mutex = New-Object System.Threading.Mutex($false, 'Local\CursorDoneNotifyHost')
@@ -1211,7 +1449,8 @@ if (-not $owned) {
 }
 
 $pidFile = Join-Path (Get-StateDir) 'host.pid'
-Write-Utf8File $pidFile ([string]$PID)
+$processStarted = (Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks
+Write-Utf8File $pidFile ("$PID|$processStarted")
 
 try {
     Add-Type -AssemblyName System.Windows.Forms
@@ -1332,10 +1571,14 @@ try {
     try {
         if (Test-Path -LiteralPath $pidFile) {
             $current = (Read-Utf8File $pidFile).Trim()
-            if ($current -eq [string]$PID) {
+            if (($current -split '\|')[0] -eq [string]$PID) {
                 Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
             }
         }
+    } catch {
+    }
+    try {
+        Remove-Item -LiteralPath (Join-Path (Get-StateDir) 'live-view.txt') -Force -ErrorAction SilentlyContinue
     } catch {
     }
     try {

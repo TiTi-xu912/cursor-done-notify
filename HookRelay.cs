@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 internal static class HookRelay
 {
@@ -115,6 +116,9 @@ internal static class HookRelay
         AppendString(sb, ref first, "generation_id", ExtractString(body, "generation_id"));
         AppendString(sb, ref first, "status", ExtractString(body, "status"));
         AppendString(sb, ref first, "tool_name", ExtractString(body, "tool_name"));
+        AppendString(sb, ref first, "tool_use_id", ExtractString(body, "tool_use_id"));
+        AppendString(sb, ref first, "subagent_id", ExtractString(body, "subagent_id"));
+        AppendString(sb, ref first, "tool_call_id", ExtractString(body, "tool_call_id"));
         AppendString(sb, ref first, "error_message", Trunc(ExtractString(body, "error_message"), 180));
         AppendString(sb, ref first, "command", Trunc(ExtractString(body, "command"), 180));
         AppendString(sb, ref first, "file_path", Trunc(ExtractString(body, "file_path"), 180));
@@ -249,28 +253,55 @@ internal static class HookRelay
     private static void EnsureHost()
     {
         string pidFile = Path.Combine(Path.GetTempPath(), "cursor-done-notify", "host.pid");
-        if (HostIsRunning(pidFile))
+        using (Mutex launch = new Mutex(false, @"Local\CursorDoneNotifyLaunch"))
         {
-            return;
-        }
+            bool owned = false;
+            try
+            {
+                try
+                {
+                    owned = launch.WaitOne(2000);
+                }
+                catch (AbandonedMutexException)
+                {
+                    owned = true;
+                }
+                if (!owned || HostIsRunning(pidFile))
+                {
+                    return;
+                }
 
-        string root = AppDomain.CurrentDomain.BaseDirectory;
-        string script = Path.Combine(root, "progress-host.ps1");
-        string powershell = Path.Combine(
-            Environment.SystemDirectory,
-            @"WindowsPowerShell\v1.0\powershell.exe");
-        if (!File.Exists(powershell))
-        {
-            powershell = "powershell.exe";
-        }
+                string root = AppDomain.CurrentDomain.BaseDirectory;
+                string script = Path.Combine(root, "progress-host.ps1");
+                string powershell = Path.Combine(
+                    Environment.SystemDirectory,
+                    @"WindowsPowerShell\v1.0\powershell.exe");
+                if (!File.Exists(powershell))
+                {
+                    powershell = "powershell.exe";
+                }
 
-        ProcessStartInfo start = new ProcessStartInfo();
-        start.FileName = powershell;
-        start.Arguments = "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + script + "\"";
-        start.WorkingDirectory = root;
-        start.UseShellExecute = false;
-        start.CreateNoWindow = true;
-        Process.Start(start);
+                ProcessStartInfo start = new ProcessStartInfo();
+                start.FileName = powershell;
+                start.Arguments = "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + script + "\"";
+                start.WorkingDirectory = root;
+                start.UseShellExecute = false;
+                start.CreateNoWindow = true;
+                Process.Start(start);
+
+                for (int i = 0; i < 20 && !HostIsRunning(pidFile); i++)
+                {
+                    Thread.Sleep(25);
+                }
+            }
+            finally
+            {
+                if (owned)
+                {
+                    launch.ReleaseMutex();
+                }
+            }
+        }
     }
 
     private static bool HostIsRunning(string pidFile)
@@ -283,14 +314,24 @@ internal static class HookRelay
             }
 
             string text = File.ReadAllText(pidFile).Trim();
+            string[] parts = text.Split('|');
             int pid;
-            if (!int.TryParse(text, out pid))
+            if (parts.Length < 2 || !int.TryParse(parts[0], out pid))
             {
                 return false;
             }
 
             Process process = Process.GetProcessById(pid);
-            return process != null && !process.HasExited;
+            long expectedStart;
+            if (!long.TryParse(parts[1], out expectedStart))
+            {
+                return false;
+            }
+            string name = process.ProcessName ?? string.Empty;
+            long actualStart = process.StartTime.ToUniversalTime().Ticks;
+            return !process.HasExited
+                && name.IndexOf("powershell", StringComparison.OrdinalIgnoreCase) >= 0
+                && actualStart == expectedStart;
         }
         catch
         {

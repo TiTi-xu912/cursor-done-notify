@@ -184,7 +184,7 @@ namespace CursorDoneBuddy
             _shown = true;
             PresentFrame();
             _timer = new Timer();
-            _timer.Interval = 33;
+            _timer.Interval = 66;
             _timer.Tick += OnTick;
             _animClock = Environment.TickCount;
             _poseSince = _animClock;
