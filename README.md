@@ -2,7 +2,7 @@
 
 A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent turn through Cursor hooks and stays on screen while the agent reads, edits, and runs commands. When the turn finishes, it plays a sound and shows a short snippet of the reply.
 
-点点是 Cursor Agent 的 Windows 桌面伙伴。Agent 开始干活后，它出现在桌面右下角，跟着读文件、改代码、跑命令换动作；这一轮结束、中断或出错时响一声，并带上回答摘要。多个对话同时进行时，它收成一张总览。
+点点是 Cursor Agent 的 Windows 桌面伙伴：一个戴耳机、穿卫衣的 Q 版程序员。Agent 开始干活后，它出现在桌面右下角，跟着读文件、改代码、跑命令换动作；这一轮结束、中断或出错时响一声，并带上回答摘要。多个对话同时进行时，它收成一张总览。气泡底部常驻一条 Cursor 额度栏，点开能看本期用量详情。
 
 ## 效果
 
@@ -19,6 +19,10 @@ A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent tu
 | 回答结束 | 这一轮出错 | 多个会话 |
 | --- | --- | --- |
 | <img src="docs/screenshots/done.png" width="240" alt="回答结束"> | <img src="docs/screenshots/error.png" width="240" alt="出错"> | <img src="docs/screenshots/board.png" width="240" alt="多个会话"> |
+
+| 额度详情 |
+| --- |
+| <img src="docs/screenshots/quota.png" width="240" alt="额度详情"> |
 
 ## 动作
 
@@ -40,7 +44,7 @@ A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent tu
 - 系统自带的 Windows PowerShell 5.1 和 .NET Framework 4.x
 - 桌面版 Cursor，并且能使用 Hooks
 
-不需要单独安装 Node.js、Python 或 .NET SDK。`install.cmd` 会用 Windows 自带的 `csc.exe` 编译两个小程序。
+不需要单独安装 Node.js、Python 或 .NET SDK。`install.cmd` 会用 Windows 自带的 `csc.exe` 编译两个小程序；读取额度用的是 Windows 自带的 `winsqlite3.dll`。
 
 ## 安装
 
@@ -85,6 +89,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnableRealtim
 [Environment]::SetEnvironmentVariable('CURSOR_NOTIFY_STALE_MINUTES', '60', 'User')
 ```
 
+## 额度
+
+气泡底部的额度栏显示本期综合用量、指定模型（API）用量和离重置还有几天；进度条超过 70% 变橙，超过 90% 变红。点一下额度栏展开详情：套餐名、账单周期、Auto 与 API 两条用量、套餐内金额和赠送金额、更新时间，再点一下收起。
+
+数据来自 Cursor 自己的用量接口（`api2.cursor.sh` 上的 `DashboardService`），和 Cursor 设置页看到的是同一份。点点从本机 `%APPDATA%\Cursor\User\globalStorage\state.vscdb` 读取 Cursor 已保存的登录令牌，只发给 Cursor 的服务器，不保存也不发给别处。窗口出现时拉一次，之后每 5 分钟、每轮结束时、以及展开详情时刷新（两次之间至少隔 20 秒）。结果缓存在 `%TEMP%\cursor-done-notify\quota-cache.txt`，只有数字，没有令牌；下次出现时先显示缓存。
+
+不想显示额度，可以关掉：
+
+```powershell
+[Environment]::SetEnvironmentVariable('CURSOR_NOTIFY_QUOTA', '0', 'User')
+```
+
 ## 卸载
 
 双击 `uninstall.cmd`。它会关掉点点，只从 `hooks.json` 里删掉当前安装目录对应的条目，并清理临时事件、摘要和错误日志；窗口位置会保留。然后完全退出 Cursor 再打开。
@@ -106,9 +122,7 @@ BuddyForm.dll           画点点
 
 安全模式注册：`beforeSubmitPrompt`、`postToolUse`、`postToolUseFailure`、`afterAgentThought`、`afterAgentResponse`、`subagentStop`、`stop`。实时模式另外注册 `preToolUse` 和 `subagentStart`。
 
-事件只留在本机临时目录里。过长的提示、命令和回答会截短后再交给窗口，超过一天的残留事件会在下次启动时清理。点点不会把这些内容发出去。
-
-`notify-done.ps1` 是一个更早的纯文字弹窗，安装程序不会注册它。
+事件只留在本机临时目录里。过长的提示、命令和回答会截短后再交给窗口，超过一天的残留事件会在下次启动时清理。点点不会把这些内容发出去；唯一的网络请求是上面说的额度查询。
 
 ## 开发
 
@@ -119,13 +133,15 @@ $env:CURSOR_NOTIFY_SELFTEST = '1'
 powershell -NoProfile -ExecutionPolicy Bypass -File .\progress-host.ps1
 ```
 
-通过时输出 `SELFTEST OK`。`tests/hooks.ps1` 会先跑这段自测，再用一个临时用户目录检查安装和卸载：别人的 hook 还在，点点的条目会被去掉。它不会改你自己的 `%USERPROFILE%\.cursor\hooks.json`。
+通过时输出 `SELFTEST OK`。`tests/hooks.ps1` 会先跑这段自测和 `tests/quota.ps1`（额度解析与缓存，不联网），再用一个临时用户目录检查安装和卸载：别人的 hook 还在，点点的条目会被去掉。它不会改你自己的 `%USERPROFILE%\.cursor\hooks.json`。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\hooks.ps1
 ```
 
-改完 `HookRelay.cs` 或 `BuddyForm.cs` 后，再运行一次 `install.cmd`。编译产物 `hook-relay.exe` 和 `BuddyForm.dll` 不进版本库。
+改完 `HookRelay.cs`、`BuddyForm.cs` 或 `Quota.cs` 后，再运行一次 `install.cmd`。编译产物 `hook-relay.exe` 和 `BuddyForm.dll` 不进版本库。
+
+要重新生成 README 里的截图，设置 `CURSOR_NOTIFY_PREVIEW=1` 再运行 `progress-host.ps1`，图片会写到 `%TEMP%\cursor-done-notify\preview`。
 
 ## 许可
 

@@ -537,10 +537,18 @@ function Update-Lifecycle {
         return
     }
     Save-CurrentSession
+    $now = Get-Date
     foreach ($key in @($script:SessionOrder)) {
-        Import-SessionBag $script:Sessions[$key]
+        $bag = $script:Sessions[$key]
+        $settled = $bag.Phase -eq 'settling' -and $bag.SettleUntil -and $now -ge $bag.SettleUntil
+        $stale = ($bag.Phase -eq 'running' -or $bag.Phase -eq 'settling') -and
+            $bag.UpdatedAt -and $now -ge $bag.UpdatedAt.AddMinutes($script:StaleMinutes)
+        if (-not $settled -and -not $stale) {
+            continue
+        }
+        Import-SessionBag $bag
         $script:SessionKey = $key
-        if ($script:Phase -eq 'settling' -and $script:SettleUntil -and (Get-Date) -ge $script:SettleUntil) {
+        if ($settled) {
             Soft-Complete
             $script:UpdatedAt = Get-Date
         }
@@ -727,12 +735,14 @@ function Get-Presentation {
     $accent = 'green'
     $pose = 'done'
     $phase = 'done'
+    if ($running -gt 0) {
+        $phase = 'running'
+    }
     if ($bad -gt 0) {
         $accent = 'red'
         $pose = 'error'
     } elseif ($running -gt 0) {
         $accent = 'blue'
-        $phase = 'running'
         if ($newestRun -and $newestRun.Pose) { $pose = [string]$newestRun.Pose }
         else { $pose = 'think' }
     } elseif ($aborted -gt 0) {
@@ -1177,16 +1187,20 @@ function Read-Inbox {
     if (-not (Test-Path -LiteralPath $dir)) {
         return
     }
-    $files = @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -ErrorAction SilentlyContinue | Sort-Object Name)
-    foreach ($file in $files) {
+    $files = [System.IO.Directory]::GetFiles($dir, '*.json')
+    if ($files.Length -eq 0) {
+        return
+    }
+    [Array]::Sort($files, [System.StringComparer]::Ordinal)
+    foreach ($path in $files) {
         $raw = ''
         try {
-            $raw = Read-Utf8File $file.FullName
+            $raw = Read-Utf8File $path
         } catch {
             continue
         }
         if ([string]::IsNullOrWhiteSpace($raw)) {
-            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
             continue
         }
         $payload = $null
@@ -1206,10 +1220,10 @@ function Read-Inbox {
             }
         }
         if ($applied) {
-            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         } else {
-            $failed = [System.IO.Path]::ChangeExtension($file.FullName, '.failed')
-            Move-Item -LiteralPath $file.FullName -Destination $failed -Force -ErrorAction SilentlyContinue
+            $failed = [System.IO.Path]::ChangeExtension($path, '.failed')
+            Move-Item -LiteralPath $path -Destination $failed -Force -ErrorAction SilentlyContinue
         }
     }
 }
@@ -1384,6 +1398,8 @@ if ($env:CURSOR_NOTIFY_SELFTEST -eq '1') {
     Assert-Phase 'first chat still running' 'running'
     if ($script:Sessions['chat-b'].Phase -ne 'done') { throw 'finished chat was overwritten' }
     if ($script:Sessions['chat-b'].Accent -ne 'red') { throw 'finished chat lost its error' }
+    $overview = Get-Presentation
+    if ($overview.Phase -ne 'running' -or $overview.Accent -ne 'red') { throw "overview with a running chat must stay running: $($overview.Phase)/$($overview.Accent)" }
     $board = Get-BoardText
     if ($board -notmatch 'bad\|') { throw "board missing error: $board" }
     if ($board -notmatch 'run\|') { throw "board missing running: $board" }
@@ -1408,23 +1424,43 @@ function Import-BuddyAssembly {
     [CursorDoneBuddy.BuddyForm]::EnableDpi()
 }
 
+function Test-QuotaEnabled {
+    return ($env:CURSOR_NOTIFY_QUOTA -ne '0')
+}
+
 if ($env:CURSOR_NOTIFY_PREVIEW -eq '1') {
     Import-BuddyAssembly
     $form = New-Object CursorDoneBuddy.BuddyForm
-    $form.SpritePath = Join-Path $PSScriptRoot 'sprites\diandian-v2-dot.png'
+    $form.SpritePath = Join-Path $PSScriptRoot 'sprites\diandian.png'
+    $epoch = [DateTimeOffset]::Now
+    $usage = '{"billingCycleStart":"' + $epoch.AddDays(-20).ToUnixTimeMilliseconds() + '","billingCycleEnd":"' + $epoch.AddDays(10).AddHours(-1).ToUnixTimeMilliseconds() +
+        '","planUsage":{"totalSpend":19235,"includedSpend":7000,"bonusSpend":12235,"limit":7000,"autoPercentUsed":13.1,"apiPercentUsed":32.4,"totalPercentUsed":14.7},"spendLimitUsage":{"limitType":"user"}}'
+    $plan = '{"planInfo":{"planName":"Pro+"}}'
+    $quota = New-Object CursorDoneBuddy.QuotaService
+    $quota.Publish([CursorDoneBuddy.QuotaParser]::Parse($usage, $plan, 'pro_plus', (Get-Date)))
+    $form.Quota = $quota
     $dir = Join-Path (Get-StateDir) 'preview'
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $steps = "已收到问题`n已完成读取 progress-host.ps1`n正在思考`n已完成修改 BuddyForm.cs`n正在执行命令 tests\hooks.ps1"
+    $board = "bad|b|看报表 · 出错`nrun|a|修登录 · 正在读取 · login.cs`ndone|c|写说明 · 已完成"
     $shots = @(
-        @{ Name = 'think'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在思考'; Detail = ''; Meta = '已用 00:08 · 第 1 步'; Hint = '点一下可以看步骤'; Pose = 'think'; Start = 0; Sweep = 0 },
-        @{ Name = 'read'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在读取'; Detail = 'progress-host.ps1'; Meta = '已用 01:12 · 第 4 步'; Hint = '点一下可以看步骤'; Pose = 'read'; Start = 0; Sweep = 0 },
-        @{ Name = 'terminal'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在执行命令'; Detail = 'npm test'; Meta = '已用 00:40 · 第 2 步'; Hint = '点一下可以看步骤'; Pose = 'terminal'; Start = 0; Sweep = 0 },
-        @{ Name = 'write'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在修改'; Detail = 'BuddyForm.cs'; Meta = '已用 01:40 · 第 6 步'; Hint = '点一下可以看步骤'; Pose = 'write'; Start = 0; Sweep = 0 },
-        @{ Name = 'search'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在搜索'; Detail = 'pose'; Meta = '已用 00:20 · 第 3 步'; Hint = '点一下可以看步骤'; Pose = 'search'; Start = 0; Sweep = 0 },
-        @{ Name = 'done'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '点一下就能关掉这个小家伙。'; Meta = '共用 02:04 · 11 步'; Hint = '点一下关掉 · 12s'; Pose = 'done'; Start = 0; Sweep = 0 },
-        @{ Name = 'error'; Phase = 'done'; Accent = 'red'; Headline = '这一轮出错了'; Activity = '可以回到对话里看'; Detail = '有一步没有成功'; Meta = '共用 00:40 · 3 步'; Hint = '点一下关掉 · 12s'; Pose = 'error'; Start = 0; Sweep = 0 }
+        @{ Name = 'think'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在思考'; Detail = ''; Meta = '已用 00:08 · 第 1 步'; Hint = '点一下可以看步骤'; Pose = 'think' },
+        @{ Name = 'read'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在读取'; Detail = 'progress-host.ps1'; Meta = '已用 01:12 · 第 4 步 · cursor-done-notify'; Hint = '点一下可以看步骤'; Pose = 'read' },
+        @{ Name = 'terminal'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在执行命令'; Detail = 'npm test'; Meta = '已用 00:40 · 第 2 步'; Hint = '点一下可以看步骤'; Pose = 'terminal' },
+        @{ Name = 'write'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在修改'; Detail = 'BuddyForm.cs'; Meta = '已用 01:40 · 第 6 步'; Hint = '点一下可以看步骤'; Pose = 'write' },
+        @{ Name = 'search'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在搜索'; Detail = 'pose'; Meta = '已用 00:20 · 第 3 步'; Hint = '点一下可以看步骤'; Pose = 'search' },
+        @{ Name = 'steps'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在执行命令'; Detail = 'tests\hooks.ps1'; Meta = '已用 02:31 · 第 9 步'; Hint = '点一下可以看步骤'; Pose = 'terminal'; History = $steps; Expanded = $true },
+        @{ Name = 'done'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '点一下就能关掉这个小家伙。'; Meta = '共用 02:04 · 11 步'; Hint = '点一下关掉 · 12s'; Pose = 'done' },
+        @{ Name = 'error'; Phase = 'done'; Accent = 'red'; Headline = '这一轮出错了'; Activity = '可以回到对话里看'; Detail = '有一步没有成功'; Meta = '共用 00:40 · 3 步'; Hint = '点一下关掉 · 12s'; Pose = 'error' },
+        @{ Name = 'board'; Phase = 'running'; Accent = 'red'; Headline = '1 个进行中 · 1 个出错 · 1 个已完成'; Activity = ''; Detail = ''; Meta = '共 3 个会话'; Hint = '点一行只处理这一路'; Pose = 'error'; History = $board },
+        @{ Name = 'quota'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '额度栏点一下就能展开详情。'; Meta = '共用 03:12 · 14 步'; Hint = '点一下关掉 · 12s'; Pose = 'done'; QuotaExpanded = $true }
     )
     foreach ($shot in $shots) {
-        $bmp = $form.RenderPreview($shot.Phase, $shot.Accent, $shot.Headline, $shot.Activity, $shot.Detail, $shot.Meta, $shot.Hint, "已收到问题`n正在读取 a.txt", [single]$shot.Start, [single]$shot.Sweep, [string]$shot.Pose)
+        $history = ''
+        if ($shot.History) { $history = [string]$shot.History }
+        $form.Expanded = [bool]$shot.Expanded
+        $form.QuotaExpanded = [bool]$shot.QuotaExpanded
+        $bmp = $form.RenderPreview($shot.Phase, $shot.Accent, $shot.Headline, $shot.Activity, $shot.Detail, $shot.Meta, $shot.Hint, $history, [single]0, [single]0, [string]$shot.Pose)
         $path = Join-Path $dir ($shot.Name + '.png')
         $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
         $bmp.Dispose()
@@ -1459,8 +1495,16 @@ try {
     Import-BuddyAssembly
 
     $script:Buddy = New-Object CursorDoneBuddy.BuddyForm
-    $script:Buddy.SpritePath = Join-Path $PSScriptRoot 'sprites\diandian-v2-dot.png'
+    $script:Buddy.SpritePath = Join-Path $PSScriptRoot 'sprites\diandian.png'
     $script:Buddy.PositionPath = Join-Path (Get-StateDir) 'buddy-position.txt'
+    $script:Quota = $null
+    $script:LastViewPhase = ''
+    if (Test-QuotaEnabled) {
+        $script:Quota = New-Object CursorDoneBuddy.QuotaService
+        $script:Quota.CachePath = Join-Path (Get-StateDir) 'quota-cache.txt'
+        $script:Buddy.Quota = $script:Quota
+        $script:Quota.Start()
+    }
     $script:Buddy.Add_DismissRequested({
         $script:Buddy.Close()
     })
@@ -1484,6 +1528,10 @@ try {
                 return
             }
             $view = Get-Presentation
+            if ($script:Quota -and $view.Phase -eq 'done' -and $script:LastViewPhase -ne 'done') {
+                $script:Quota.RequestRefresh()
+            }
+            $script:LastViewPhase = [string]$view.Phase
             $history = [string]$view.History
             $signature = @(
                 [string]$view.Phase,
@@ -1562,6 +1610,9 @@ try {
     $script:Buddy.Add_FormClosed({
         $timer.Stop()
         $timer.Dispose()
+        if ($script:Quota) {
+            $script:Quota.Dispose()
+        }
     })
 
     Update-Buddy

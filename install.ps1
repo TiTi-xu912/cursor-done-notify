@@ -44,7 +44,7 @@ function Clear-BuddyState {
     if (-not (Test-Path -LiteralPath $stateDir)) {
         return
     }
-    foreach ($name in @('inbox', 'responses', 'live-view.txt', 'last-error.txt', 'last-popup-ok.txt', 'host.pid')) {
+    foreach ($name in @('inbox', 'responses', 'live-view.txt', 'last-error.txt', 'last-popup-ok.txt', 'host.pid', 'quota-cache.txt')) {
         Remove-Item -LiteralPath (Join-Path $stateDir $name) -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -55,15 +55,15 @@ function Build-Buddy {
     $relayOut = Join-Path $root 'hook-relay.exe'
     $relaySrc = Join-Path $root 'HookRelay.cs'
     $formOut = Join-Path $root 'BuddyForm.dll'
-    $formSrc = Join-Path $root 'BuddyForm.cs'
+    $formSrc = @((Join-Path $root 'BuddyForm.cs'), (Join-Path $root 'Quota.cs'))
     $buildDir = Join-Path $env:TEMP ('cursor-done-notify-build-' + [guid]::NewGuid().ToString('n'))
     $relayTemp = Join-Path $buildDir 'hook-relay.exe'
     $formTemp = Join-Path $buildDir 'BuddyForm.dll'
     New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
     try {
-        & $csc /nologo /warn:4 /target:exe "/out:$relayTemp" $relaySrc
+        & $csc /nologo /warn:4 /codepage:65001 /target:exe "/out:$relayTemp" $relaySrc
         if ($LASTEXITCODE -ne 0) { throw 'hook-relay.exe 编译失败' }
-        & $csc /nologo /warn:4 /target:library "/out:$formTemp" /r:System.Drawing.dll /r:System.Windows.Forms.dll $formSrc
+        & $csc /nologo /warn:4 /codepage:65001 /target:library "/out:$formTemp" /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll $formSrc
         if ($LASTEXITCODE -ne 0) { throw 'BuddyForm.dll 编译失败' }
 
         Stop-BuddyHost

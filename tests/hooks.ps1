@@ -12,6 +12,8 @@ $env:CURSOR_NOTIFY_SELFTEST = '1'
 & (Join-Path $root 'progress-host.ps1')
 Remove-Item Env:CURSOR_NOTIFY_SELFTEST
 
+& (Join-Path $PSScriptRoot 'quota.ps1')
+
 $originalTemp = $env:TEMP
 $fakeHome = Join-Path $originalTemp ('cursor-done-notify-osstest-' + [guid]::NewGuid().ToString('n'))
 $installRoot = Join-Path $fakeHome 'install folder with spaces'

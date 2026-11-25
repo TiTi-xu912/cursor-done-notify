@@ -55,12 +55,30 @@ namespace CursorDoneBuddy
         int _lastDragX;
         bool _blitFailed;
 
+        Bitmap _canvas;
+        byte[] _pixels;
+        IntPtr _memDc;
+        IntPtr _dib;
+        IntPtr _dibBits;
+        IntPtr _dibOld;
+        int _dibW;
+        int _dibH;
+        Bitmap _measureBitmap;
+        Graphics _measure;
+        Spot _layout;
+
+        QuotaService _quota;
+        int _quotaVersion = -1;
+        bool _quotaExpanded;
+        RectangleF _quotaRect;
+
         Font _fontHeadline;
         Font _fontMeta;
         Font _fontActivity;
         Font _fontDetail;
         Font _fontHint;
         StringFormat _single;
+        StringFormat _singleRight;
         StringFormat _wrap;
 
         public BuddyForm()
@@ -82,6 +100,8 @@ namespace CursorDoneBuddy
             _single = new StringFormat();
             _single.Trimming = StringTrimming.EllipsisCharacter;
             _single.FormatFlags = StringFormatFlags.NoWrap;
+            _singleRight = (StringFormat)_single.Clone();
+            _singleRight.Alignment = StringAlignment.Far;
             _wrap = new StringFormat();
             _wrap.Trimming = StringTrimming.EllipsisCharacter;
             ClientSize = new Size((int)Math.Round(Px(360)), (int)Math.Round(Px(168)));
@@ -93,6 +113,29 @@ namespace CursorDoneBuddy
         public string ActivatedSessionKey { get; private set; }
         public event EventHandler SessionActivated;
         public event EventHandler DismissRequested;
+
+        public QuotaService Quota
+        {
+            get { return _quota; }
+            set
+            {
+                _quota = value;
+                _quotaVersion = -1;
+                InvalidateLayout();
+            }
+        }
+
+        public bool Expanded
+        {
+            get { return _expanded; }
+            set { _expanded = value; InvalidateLayout(); }
+        }
+
+        public bool QuotaExpanded
+        {
+            get { return _quotaExpanded; }
+            set { _quotaExpanded = value; InvalidateLayout(); }
+        }
 
         public static void EnableDpi()
         {
@@ -132,11 +175,13 @@ namespace CursorDoneBuddy
 
         public Bitmap RenderPreview(string phase, string accent, string headline, string activity, string detail, string meta, string hint, string history, float ringStart, float ringSweep, string pose)
         {
+            _poseSince = 0;
             SetContent(phase, accent, headline, activity, detail, meta, hint, history, pose);
             _start = ringStart;
             _sweep = ringSweep;
             _celebrate = (phase == "done" || phase == "settling") && accent == "green" ? 10 : 0;
-            return Render();
+            Bitmap frame = Render();
+            return frame.Clone(new Rectangle(0, 0, frame.Width, frame.Height), PixelFormat.Format32bppArgb);
         }
 
         public void ClampToScreen()
@@ -204,6 +249,22 @@ namespace CursorDoneBuddy
                 _sprites.Dispose();
                 _sprites = null;
             }
+            ReleaseSurface();
+            if (_canvas != null)
+            {
+                _canvas.Dispose();
+                _canvas = null;
+            }
+            if (_measure != null)
+            {
+                _measure.Dispose();
+                _measure = null;
+            }
+            if (_measureBitmap != null)
+            {
+                _measureBitmap.Dispose();
+                _measureBitmap = null;
+            }
             DisposeClips();
             DisposeFonts();
             base.OnFormClosed(e);
@@ -254,7 +315,7 @@ namespace CursorDoneBuddy
                     if (_shown) PresentFrame();
                 }
             }
-            Cursor = _closeRect.Contains(e.Location) || BoardKeyAt(e.Location) != null || HitCharacter(e.Location) ? Cursors.Hand : Cursors.SizeAll;
+            Cursor = _closeRect.Contains(e.Location) || HitQuota(e.Location) || BoardKeyAt(e.Location) != null || HitCharacter(e.Location) ? Cursors.Hand : Cursors.SizeAll;
             base.OnMouseMove(e);
         }
 
@@ -268,6 +329,12 @@ namespace CursorDoneBuddy
             {
                 ClampToScreen();
                 SavePosition();
+            }
+            else if (HitQuota(e.Location))
+            {
+                QuotaExpanded = !_quotaExpanded;
+                if (_quotaExpanded && _quota != null) _quota.RequestRefresh();
+                PresentFrame();
             }
             else
             {
@@ -288,7 +355,7 @@ namespace CursorDoneBuddy
                 }
                 else
                 {
-                    _expanded = !_expanded;
+                    Expanded = !_expanded;
                     PresentFrame();
                 }
             }
@@ -338,7 +405,33 @@ namespace CursorDoneBuddy
                 draw = true;
             }
             if (AdvanceAnimations()) draw = true;
+            if (_quota != null && _quota.Version != _quotaVersion)
+            {
+                _quotaVersion = _quota.Version;
+                InvalidateLayout();
+                draw = true;
+            }
             if (draw) PresentFrame();
+        }
+
+        void InvalidateLayout()
+        {
+            _layout = null;
+        }
+
+        Spot CurrentLayout()
+        {
+            if (_layout == null)
+            {
+                if (_measure == null)
+                {
+                    _measureBitmap = new Bitmap(8, 8, PixelFormat.Format32bppArgb);
+                    _measure = Graphics.FromImage(_measureBitmap);
+                    _measure.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                }
+                _layout = Compute(_measure);
+            }
+            return _layout;
         }
 
         void RaiseDismiss()
@@ -359,14 +452,10 @@ namespace CursorDoneBuddy
 
         void EnsureSize()
         {
-            using (Bitmap scratch = new Bitmap(8, 8, PixelFormat.Format32bppArgb))
-            using (Graphics graphics = Graphics.FromImage(scratch))
+            Spot layout = CurrentLayout();
+            if (ClientSize.Width != layout.Width || ClientSize.Height != layout.Height)
             {
-                Spot layout = Compute(graphics);
-                if (ClientSize.Width != layout.Width || ClientSize.Height != layout.Height)
-                {
-                    ClientSize = new Size(layout.Width, layout.Height);
-                }
+                ClientSize = new Size(layout.Width, layout.Height);
             }
         }
 
@@ -374,37 +463,28 @@ namespace CursorDoneBuddy
         {
             if (!_shown || IsDisposed) return;
             Bitmap frame = Render();
-            try
+            if (ClientSize.Width != frame.Width || ClientSize.Height != frame.Height)
             {
-                if (ClientSize.Width != frame.Width || ClientSize.Height != frame.Height)
+                int oldHeight = Height;
+                ClientSize = new Size(frame.Width, frame.Height);
+                if (Height != oldHeight)
                 {
-                    int oldHeight = Height;
-                    ClientSize = new Size(frame.Width, frame.Height);
-                    if (Height != oldHeight)
-                    {
-                        Top -= (Height - oldHeight);
-                        ClampToScreen();
-                    }
+                    Top -= (Height - oldHeight);
+                    ClampToScreen();
                 }
-                Blit(frame);
             }
-            finally
-            {
-                frame.Dispose();
-            }
+            Blit(frame);
         }
 
         Bitmap Render()
         {
-            Spot layout;
-            Bitmap bmp;
-            using (Bitmap scratch = new Bitmap(8, 8, PixelFormat.Format32bppArgb))
-            using (Graphics measure = Graphics.FromImage(scratch))
+            Spot layout = CurrentLayout();
+            if (_canvas == null || _canvas.Width != layout.Width || _canvas.Height != layout.Height)
             {
-                layout = Compute(measure);
+                if (_canvas != null) _canvas.Dispose();
+                _canvas = new Bitmap(layout.Width, layout.Height, PixelFormat.Format32bppPArgb);
             }
-            bmp = new Bitmap(layout.Width, layout.Height, PixelFormat.Format32bppArgb);
-            using (Graphics g = Graphics.FromImage(bmp))
+            using (Graphics g = Graphics.FromImage(_canvas))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
@@ -413,9 +493,9 @@ namespace CursorDoneBuddy
                 DrawBubble(g, layout);
                 DrawCharacter(g, layout);
             }
-            CacheAlpha(bmp);
             _closeRect = Rectangle.Round(layout.Close);
-            return bmp;
+            _quotaRect = layout.HasQuota ? layout.Quota : RectangleF.Empty;
+            return _canvas;
         }
 
         void DrawBubble(Graphics g, Spot layout)
@@ -468,6 +548,7 @@ namespace CursorDoneBuddy
                 }
                 g.DrawString(_hint, _fontHint, faint, layout.Hint, _single);
             }
+            if (layout.HasQuota) DrawQuota(g, layout);
 
             RectangleF close = layout.Close;
             using (SolidBrush closeFill = new SolidBrush(Color.FromArgb(255, 244, 232, 216)))
@@ -480,6 +561,146 @@ namespace CursorDoneBuddy
                 g.DrawLine(closePen, close.X + pad, close.Y + pad, close.Right - pad, close.Bottom - pad);
                 g.DrawLine(closePen, close.Right - pad, close.Y + pad, close.X + pad, close.Bottom - pad);
             }
+        }
+
+        List<QuotaRow> BuildQuotaRows(DateTime now)
+        {
+            if (_quota == null) return null;
+            List<QuotaRow> rows = new List<QuotaRow>();
+            QuotaSnapshot s = _quota.Latest;
+            QuotaRow head = new QuotaRow();
+            head.Label = "额度";
+            rows.Add(head);
+            if (s == null)
+            {
+                head.Text = "正在读取…";
+                return rows;
+            }
+            if (!s.Ok)
+            {
+                head.Text = "暂时取不到";
+                head.Right = _quotaExpanded ? "" : "点开看原因";
+                if (_quotaExpanded)
+                {
+                    rows.Add(QuotaRow.Note(s.Error, true));
+                    rows.Add(QuotaRow.Note("尝试于 " + s.FetchedAt.ToString("HH:mm") + " · 点这里收起", false));
+                }
+                return rows;
+            }
+
+            double headline = s.HeadlinePercent;
+            int days = s.DaysLeft(now);
+            head.Bar = headline;
+            head.Text = QuotaSnapshot.Percent(headline);
+            List<string> right = new List<string>();
+            if (!_quotaExpanded && s.ApiPercent >= 0) right.Add("API " + QuotaSnapshot.Percent(s.ApiPercent));
+            if (days >= 0) right.Add(_quotaExpanded ? days + " 天后重置" : "剩 " + days + " 天");
+            head.Right = string.Join(" · ", right.ToArray());
+            if (!_quotaExpanded) return rows;
+
+            string period = "";
+            if (s.CycleStart != DateTime.MinValue && s.CycleEnd != DateTime.MinValue)
+            {
+                period = s.CycleStart.ToString("MM/dd") + " – " + s.CycleEnd.ToString("MM/dd");
+            }
+            string plan = string.IsNullOrEmpty(s.PlanName) ? "本期" : s.PlanName + " 套餐";
+            rows.Add(QuotaRow.Note(string.IsNullOrEmpty(period) ? plan : plan + " · " + period, false));
+            if (s.AutoPercent >= 0) rows.Add(QuotaRow.Meter("Auto", s.AutoPercent));
+            if (s.ApiPercent >= 0) rows.Add(QuotaRow.Meter("API", s.ApiPercent));
+
+            List<string> spend = new List<string>();
+            if (s.IncludedSpendCents >= 0 && s.LimitCents > 0) spend.Add("套餐内 " + QuotaSnapshot.Money(s.IncludedSpendCents) + " / " + QuotaSnapshot.Money(s.LimitCents));
+            else if (s.TotalSpendCents >= 0) spend.Add("已用 " + QuotaSnapshot.Money(s.TotalSpendCents));
+            if (s.BonusSpendCents > 0) spend.Add("赠送 " + QuotaSnapshot.Money(s.BonusSpendCents));
+            if (spend.Count > 0) rows.Add(QuotaRow.Note(string.Join(" · ", spend.ToArray()), false));
+
+            if (s.OnDemandLimitCents > 0)
+            {
+                QuotaRow onDemand = QuotaRow.Meter("按需", s.OnDemandUsedCents * 100.0 / s.OnDemandLimitCents);
+                onDemand.Text = QuotaSnapshot.Money(s.OnDemandUsedCents) + " / " + QuotaSnapshot.Money(s.OnDemandLimitCents);
+                rows.Add(onDemand);
+            }
+
+            string footer = "更新于 " + s.FetchedAt.ToString("HH:mm");
+            if (!string.IsNullOrEmpty(s.Error)) footer += " · 刷新失败";
+            rows.Add(QuotaRow.Note(footer + " · 点这里收起", !string.IsNullOrEmpty(s.Error)));
+            return rows;
+        }
+
+        void DrawQuota(Graphics g, Spot layout)
+        {
+            RectangleF area = layout.Quota;
+            using (Pen line = new Pen(Color.FromArgb(255, 236, 226, 210), Math.Max(1f, Px(1f))))
+            {
+                g.DrawLine(line, area.X, area.Y - Px(5), area.Right, area.Y - Px(5));
+            }
+            float y = area.Y;
+            using (SolidBrush ink = new SolidBrush(Color.FromArgb(255, 63, 52, 40)))
+            using (SolidBrush muted = new SolidBrush(Color.FromArgb(255, 122, 110, 96)))
+            using (SolidBrush faint = new SolidBrush(Color.FromArgb(255, 156, 146, 132)))
+            using (SolidBrush warn = new SolidBrush(Color.FromArgb(255, 196, 112, 20)))
+            using (SolidBrush track = new SolidBrush(Color.FromArgb(255, 238, 228, 212)))
+            {
+                for (int i = 0; i < layout.QuotaRows.Count; i++)
+                {
+                    QuotaRow row = layout.QuotaRows[i];
+                    float rowH = i == 0 ? Px(18) : Px(17);
+                    float x = area.X;
+                    if (!string.IsNullOrEmpty(row.Label))
+                    {
+                        float lw = Px(36);
+                        g.DrawString(row.Label, _fontHint, muted, new RectangleF(x, y, lw, rowH), _single);
+                        x += lw;
+                    }
+                    if (row.Bar > -2)
+                    {
+                        float barW = i == 0 ? Px(60) : Px(118);
+                        float barH = Px(6);
+                        RectangleF bar = new RectangleF(x, y + (rowH - barH) / 2f, barW, barH);
+                        using (GraphicsPath path = Rounded(bar, barH / 2f))
+                        {
+                            g.FillPath(track, path);
+                        }
+                        double pct = Math.Max(0, Math.Min(100, row.Bar));
+                        if (pct > 0)
+                        {
+                            RectangleF fill = new RectangleF(bar.X, bar.Y, Math.Max(barH, (float)(bar.Width * pct / 100.0)), barH);
+                            using (GraphicsPath path = Rounded(fill, barH / 2f))
+                            using (SolidBrush brush = new SolidBrush(QuotaColor(row.Bar)))
+                            {
+                                g.FillPath(brush, path);
+                            }
+                        }
+                        x += barW + Px(6);
+                    }
+                    if (!string.IsNullOrEmpty(row.Text))
+                    {
+                        Brush brush = row.Warn ? (Brush)warn : (i == 0 || row.Bar > -2 ? (Brush)ink : (Brush)muted);
+                        float tw = string.IsNullOrEmpty(row.Right)
+                            ? area.Right - x
+                            : Math.Min(area.Right - x, g.MeasureString(row.Text, _fontHint, PointF.Empty, _single).Width);
+                        g.DrawString(row.Text, _fontHint, brush, new RectangleF(x, y, Math.Max(1f, tw), rowH), _single);
+                        x += tw + Px(8);
+                    }
+                    if (!string.IsNullOrEmpty(row.Right) && area.Right - x > Px(12))
+                    {
+                        g.DrawString(row.Right, _fontHint, faint, new RectangleF(x, y, area.Right - x, rowH), _singleRight);
+                    }
+                    y += rowH;
+                }
+            }
+        }
+
+        static Color QuotaColor(double percent)
+        {
+            if (percent >= 90) return Color.FromArgb(255, 220, 64, 64);
+            if (percent >= 70) return Color.FromArgb(255, 224, 138, 30);
+            return Color.FromArgb(255, 47, 111, 235);
+        }
+
+        bool HitQuota(Point point)
+        {
+            return _quota != null && !_quotaRect.IsEmpty && _quotaRect.Contains(point);
         }
 
         void DrawCharacter(Graphics g, Spot layout)
@@ -520,11 +741,11 @@ namespace CursorDoneBuddy
         void Poke()
         {
             _poked = true;
-            _pokeUntil = Environment.TickCount + 420;
+            _pokeUntil = Environment.TickCount + 520;
             PoseClip idle = LoadPose("idle");
             if (idle != null && idle.Frames != null && idle.Frames.Length > 1)
             {
-                idle.Index = 1;
+                idle.Index = PokeFrame(idle);
                 idle.Wait = 0;
             }
             if (_shown) PresentFrame();
@@ -558,9 +779,14 @@ namespace CursorDoneBuddy
             if (_poked && Environment.TickCount < _pokeUntil)
             {
                 PoseClip idle = LoadPose("idle");
-                if (idle != null && idle.Frames != null && idle.Frames.Length > 1) return idle.Frames[1];
+                if (idle != null && idle.Frames != null && idle.Frames.Length > 1) return idle.Frames[PokeFrame(idle)];
             }
             return FrameOf(_pose);
+        }
+
+        static int PokeFrame(PoseClip idle)
+        {
+            return idle.Frames.Length > 2 ? 2 : 1;
         }
 
         Bitmap FrameOf(string pose)
@@ -618,6 +844,7 @@ namespace CursorDoneBuddy
             _meta = meta ?? "";
             _hint = hint ?? "";
             _history = history ?? "";
+            InvalidateLayout();
             if (changed)
             {
                 if (_phase == "running") _sweep = 76f;
@@ -639,6 +866,7 @@ namespace CursorDoneBuddy
         {
             _pose = nextPose;
             _poseSince = Environment.TickCount;
+            InvalidateLayout();
             PoseClip entered = LoadPose(_pose);
             if (entered != null)
             {
@@ -1062,16 +1290,20 @@ namespace CursorDoneBuddy
                 else
                 {
                     SizeF measuredHistory = g.MeasureString(_history, _fontHint, (int)textW, _wrap);
-                    historyH = Math.Min(Px(68), measuredHistory.Height + Px(8));
+                    historyH = Math.Min(Px(92), measuredHistory.Height + Px(8));
                 }
             }
             float hintH = string.IsNullOrEmpty(_hint) ? 0f : Px(16);
+            List<QuotaRow> quotaRows = BuildQuotaRows(DateTime.Now);
+            bool hasQuota = quotaRows != null && quotaRows.Count > 0;
+            float quotaH = hasQuota ? Px(18) + (quotaRows.Count - 1) * Px(17) : 0f;
             float textH = headlineH;
             if (metaH > 0) textH += Px(2) + metaH;
             if (activityH > 0) textH += Px(3) + activityH;
             if (detailH > 0) textH += Px(2) + detailH;
             if (historyH > 0) textH += Px(8) + historyH;
             if (hintH > 0) textH += Px(4) + hintH;
+            if (quotaH > 0) textH += Px(11) + quotaH;
 
             float bubbleH = Math.Max(Px(108), textH + Px(24));
             EnsureSprites();
@@ -1108,6 +1340,7 @@ namespace CursorDoneBuddy
             RectangleF history = new RectangleF(textX, cursor + Px(8), textW, Math.Max(0f, historyH - Px(8)));
             if (historyH > 0) cursor += historyH;
             RectangleF hint = new RectangleF(textX, cursor + Px(4), textW, hintH);
+            RectangleF quota = new RectangleF(textX, bubble.Bottom - Px(10) - quotaH, textW, quotaH);
             RectangleF close = new RectangleF(bubble.Right - Px(24), bubble.Top + Px(8), Px(16), Px(16));
 
             Spot spot = new Spot();
@@ -1130,36 +1363,10 @@ namespace CursorDoneBuddy
             spot.History = history;
             spot.HasDetail = hasDetail;
             spot.HasHistory = hasHistory;
+            spot.HasQuota = hasQuota;
+            spot.Quota = quota;
+            spot.QuotaRows = quotaRows;
             return spot;
-        }
-
-        void CacheAlpha(Bitmap bmp)
-        {
-            BitmapData data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-            try
-            {
-                _alphaW = bmp.Width;
-                _alphaH = bmp.Height;
-                if (_alpha == null || _alpha.Length != _alphaW * _alphaH)
-                {
-                    _alpha = new byte[_alphaW * _alphaH];
-                }
-                int stride = data.Stride;
-                byte[] row = new byte[Math.Abs(stride)];
-                for (int y = 0; y < bmp.Height; y++)
-                {
-                    IntPtr src = new IntPtr(data.Scan0.ToInt64() + y * stride);
-                    Marshal.Copy(src, row, 0, row.Length);
-                    for (int x = 0; x < bmp.Width; x++)
-                    {
-                        _alpha[y * _alphaW + x] = row[x * 4 + 3];
-                    }
-                }
-            }
-            finally
-            {
-                bmp.UnlockBits(data);
-            }
         }
 
         int AlphaAt(int x, int y)
@@ -1168,58 +1375,71 @@ namespace CursorDoneBuddy
             return _alpha[y * _alphaW + x];
         }
 
+        void EnsureSurface(IntPtr screenDc, int width, int height)
+        {
+            if (_dib != IntPtr.Zero && _dibW == width && _dibH == height) return;
+            ReleaseSurface();
+            _memDc = CreateCompatibleDC(screenDc);
+            if (_memDc == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+            BitmapInfo info = new BitmapInfo();
+            info.biSize = Marshal.SizeOf(typeof(BitmapInfo));
+            info.biWidth = width;
+            info.biHeight = -height;
+            info.biPlanes = 1;
+            info.biBitCount = 32;
+            info.biCompression = 0;
+            _dib = CreateDIBSection(screenDc, ref info, 0, out _dibBits, IntPtr.Zero, 0);
+            if (_dib == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+            _dibOld = SelectObject(_memDc, _dib);
+            _dibW = width;
+            _dibH = height;
+        }
+
+        void ReleaseSurface()
+        {
+            if (_memDc != IntPtr.Zero && _dibOld != IntPtr.Zero) SelectObject(_memDc, _dibOld);
+            if (_dib != IntPtr.Zero) DeleteObject(_dib);
+            if (_memDc != IntPtr.Zero) DeleteDC(_memDc);
+            _memDc = IntPtr.Zero;
+            _dib = IntPtr.Zero;
+            _dibBits = IntPtr.Zero;
+            _dibOld = IntPtr.Zero;
+            _dibW = 0;
+            _dibH = 0;
+        }
+
         void Blit(Bitmap bitmap)
         {
+            int width = bitmap.Width;
+            int height = bitmap.Height;
             IntPtr screenDc = GetDC(IntPtr.Zero);
-            IntPtr memDc = CreateCompatibleDC(screenDc);
-            IntPtr dib = IntPtr.Zero;
-            IntPtr old = IntPtr.Zero;
             try
             {
-                BitmapInfo info = new BitmapInfo();
-                info.biSize = Marshal.SizeOf(typeof(BitmapInfo));
-                info.biWidth = bitmap.Width;
-                info.biHeight = -bitmap.Height;
-                info.biPlanes = 1;
-                info.biBitCount = 32;
-                info.biCompression = 0;
-                IntPtr bits;
-                dib = CreateDIBSection(screenDc, ref info, 0, out bits, IntPtr.Zero, 0);
-                if (dib == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+                EnsureSurface(screenDc, width, height);
 
-                BitmapData data = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                int bytes = width * height * 4;
+                if (_pixels == null || _pixels.Length != bytes) _pixels = new byte[bytes];
+                if (_alpha == null || _alpha.Length != width * height) _alpha = new byte[width * height];
+                _alphaW = width;
+                _alphaH = height;
+                BitmapData data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
                 try
                 {
-                    int width = bitmap.Width;
-                    int height = bitmap.Height;
-                    int srcStride = data.Stride;
-                    byte[] row = new byte[Math.Abs(srcStride)];
-                    for (int y = 0; y < height; y++)
-                    {
-                        Marshal.Copy(new IntPtr(data.Scan0.ToInt64() + y * srcStride), row, 0, row.Length);
-                        for (int x = 0; x < width; x++)
-                        {
-                            int i = x * 4;
-                            byte b = row[i];
-                            byte gg = row[i + 1];
-                            byte r = row[i + 2];
-                            byte a = row[i + 3];
-                            row[i] = (byte)(b * a / 255);
-                            row[i + 1] = (byte)(gg * a / 255);
-                            row[i + 2] = (byte)(r * a / 255);
-                        }
-                        Marshal.Copy(row, 0, new IntPtr(bits.ToInt64() + y * width * 4), width * 4);
-                    }
+                    Marshal.Copy(data.Scan0, _pixels, 0, bytes);
                 }
                 finally
                 {
                     bitmap.UnlockBits(data);
                 }
+                for (int i = 0, p = 3; i < _alpha.Length; i++, p += 4)
+                {
+                    _alpha[i] = _pixels[p];
+                }
+                Marshal.Copy(_pixels, 0, _dibBits, bytes);
 
-                old = SelectObject(memDc, dib);
                 SizeInfo size = new SizeInfo();
-                size.cx = bitmap.Width;
-                size.cy = bitmap.Height;
+                size.cx = width;
+                size.cy = height;
                 PointInfo src = new PointInfo();
                 PointInfo dst = new PointInfo();
                 dst.x = Left;
@@ -1229,7 +1449,7 @@ namespace CursorDoneBuddy
                 blend.BlendFlags = 0;
                 blend.SourceConstantAlpha = 255;
                 blend.AlphaFormat = 1;
-                bool ok = UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, 2);
+                bool ok = UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, _memDc, ref src, 0, ref blend, 2);
                 if (!ok && !_blitFailed)
                 {
                     _blitFailed = true;
@@ -1238,9 +1458,6 @@ namespace CursorDoneBuddy
             }
             finally
             {
-                if (old != IntPtr.Zero) SelectObject(memDc, old);
-                if (dib != IntPtr.Zero) DeleteObject(dib);
-                DeleteDC(memDc);
                 ReleaseDC(IntPtr.Zero, screenDc);
             }
         }
@@ -1262,6 +1479,7 @@ namespace CursorDoneBuddy
             if (_fontDetail != null) _fontDetail.Dispose();
             if (_fontHint != null) _fontHint.Dispose();
             if (_single != null) _single.Dispose();
+            if (_singleRight != null) _singleRight.Dispose();
             if (_wrap != null) _wrap.Dispose();
         }
 
@@ -1414,8 +1632,37 @@ namespace CursorDoneBuddy
             public RectangleF Detail;
             public RectangleF Hint;
             public RectangleF History;
+            public RectangleF Quota;
+            public List<QuotaRow> QuotaRows;
             public bool HasDetail;
             public bool HasHistory;
+            public bool HasQuota;
+        }
+
+        class QuotaRow
+        {
+            public string Label = "";
+            public string Text = "";
+            public string Right = "";
+            public double Bar = -2;
+            public bool Warn;
+
+            public static QuotaRow Note(string text, bool warn)
+            {
+                QuotaRow row = new QuotaRow();
+                row.Text = text ?? "";
+                row.Warn = warn;
+                return row;
+            }
+
+            public static QuotaRow Meter(string label, double percent)
+            {
+                QuotaRow row = new QuotaRow();
+                row.Label = label;
+                row.Bar = percent;
+                row.Text = QuotaSnapshot.Percent(percent);
+                return row;
+            }
         }
     }
 }
