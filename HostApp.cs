@@ -129,8 +129,11 @@ namespace CursorDoneBuddy
         {
             ClearStale();
             Application.EnableVisualStyles();
+            BuddySettings settings = BuddySettings.Load(_settingsPath);
+            L.Apply(settings.Language);
             _state = BuddyState.FromEnvironment();
-            _state.Settings = BuddySettings.Load(_settingsPath);
+            _state.Settings = settings;
+            _state.ApplyTiming(settings);
             _state.QuotaAlertPath = Path.Combine(_stateDir, "quota-alert.txt");
             _state.Sound = PlaySound;
 
@@ -143,6 +146,9 @@ namespace CursorDoneBuddy
                 _quota.CachePath = Path.Combine(_stateDir, "quota-cache.txt");
                 _quota.Start();
             }
+            _tray = new NotifyIcon();
+            _tray.Icon = TrayIcon();
+            _tray.Visible = true;
             BuildMenu();
             ApplySettings();
 
@@ -343,8 +349,22 @@ namespace CursorDoneBuddy
             catch (Win32Exception) { }
         }
 
+        ToolStripMenuItem _secondsItem;
+        ToolStripMenuItem _staleItem;
+        ToolStripMenuItem _languageItem;
+
+        static ToolStripMenuItem Choice(ToolStripMenuItem parent, string text, object tag, EventHandler click)
+        {
+            ToolStripMenuItem item = new ToolStripMenuItem(text);
+            item.Tag = tag;
+            item.Click += click;
+            parent.DropDownItems.Add(item);
+            return item;
+        }
+
         void BuildMenu()
         {
+            ContextMenuStrip old = _buddy.ContextMenuStrip;
             ContextMenuStrip menu = new ContextMenuStrip();
             _muteItem = new ToolStripMenuItem(L.T("静音", "Mute"));
             _muteItem.Click += delegate { _state.Settings.Mute = !_state.Settings.Mute; SaveAndApply(); };
@@ -362,14 +382,48 @@ namespace CursorDoneBuddy
             };
             foreach (string[] theme in themes)
             {
-                ToolStripMenuItem item = new ToolStripMenuItem(theme[1]);
-                item.Tag = theme[0];
-                item.Click += delegate(object sender, EventArgs e)
+                Choice(_themeItem, theme[1], theme[0], delegate(object sender, EventArgs e)
                 {
                     _state.Settings.Theme = (string)((ToolStripMenuItem)sender).Tag;
                     SaveAndApply();
-                };
-                _themeItem.DropDownItems.Add(item);
+                });
+            }
+            _secondsItem = new ToolStripMenuItem(L.T("结束后停留", "Stay after finishing"));
+            foreach (int seconds in BuddySettings.SecondChoices)
+            {
+                Choice(_secondsItem, L.T(seconds + " 秒", seconds + " seconds"), seconds, delegate(object sender, EventArgs e)
+                {
+                    _state.Settings.Seconds = (int)((ToolStripMenuItem)sender).Tag;
+                    SaveAndApply();
+                });
+            }
+            _staleItem = new ToolStripMenuItem(L.T("多久没动静算失联", "Treat as lost after"));
+            foreach (int minutes in BuddySettings.StaleChoices)
+            {
+                string label = minutes < 60 ? L.T(minutes + " 分钟", minutes + " minutes") : L.T(minutes / 60 + " 小时", minutes / 60 + (minutes == 60 ? " hour" : " hours"));
+                Choice(_staleItem, label, minutes, delegate(object sender, EventArgs e)
+                {
+                    _state.Settings.StaleMinutes = (int)((ToolStripMenuItem)sender).Tag;
+                    SaveAndApply();
+                });
+            }
+            _languageItem = new ToolStripMenuItem(L.T("语言", "Language"));
+            string[][] languages = new string[][]
+            {
+                new string[] { "auto", L.T("跟随系统", "Follow Windows") },
+                new string[] { "zh", "中文" },
+                new string[] { "en", "English" }
+            };
+            foreach (string[] language in languages)
+            {
+                Choice(_languageItem, language[1], language[0], delegate(object sender, EventArgs e)
+                {
+                    _state.Settings.Language = (string)((ToolStripMenuItem)sender).Tag;
+                    _state.Settings.Save(_settingsPath);
+                    L.Apply(_state.Settings.Language);
+                    BuildMenu();
+                    ApplySettings();
+                });
             }
             ToolStripMenuItem usage = new ToolStripMenuItem(L.T("打开 Cursor 用量页", "Open Cursor usage page"));
             usage.Click += delegate
@@ -386,16 +440,16 @@ namespace CursorDoneBuddy
             menu.Items.Add(_quietItem);
             menu.Items.Add(_quotaItem);
             menu.Items.Add(_themeItem);
+            menu.Items.Add(_secondsItem);
+            menu.Items.Add(_staleItem);
+            menu.Items.Add(_languageItem);
             menu.Items.Add(usage);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(close);
             _buddy.ContextMenuStrip = menu;
-
-            _tray = new NotifyIcon();
-            _tray.Icon = TrayIcon();
             _tray.Text = L.T("点点", "Diandian");
             _tray.ContextMenuStrip = menu;
-            _tray.Visible = true;
+            if (old != null) old.Dispose();
         }
 
         void SaveAndApply()
@@ -415,6 +469,19 @@ namespace CursorDoneBuddy
             foreach (ToolStripMenuItem item in _themeItem.DropDownItems)
             {
                 item.Checked = (string)item.Tag == settings.Theme;
+            }
+            _state.ApplyTiming(settings);
+            foreach (ToolStripMenuItem item in _secondsItem.DropDownItems)
+            {
+                item.Checked = (int)item.Tag == _state.DoneSeconds;
+            }
+            foreach (ToolStripMenuItem item in _staleItem.DropDownItems)
+            {
+                item.Checked = (int)item.Tag == _state.StaleMinutes;
+            }
+            foreach (ToolStripMenuItem item in _languageItem.DropDownItems)
+            {
+                item.Checked = (string)item.Tag == settings.Language;
             }
             _lastSignature = "";
         }
@@ -509,8 +576,13 @@ namespace CursorDoneBuddy
                     new Shot("alert", "running", "blue", "正在处理", "正在查找资料", "docs.cursor.com", "已用 00:52 · 第 5 步", "本期 API 额度已用 85%", "web") { HintAlert = true },
                     new Shot("dark", "done", "green", "回答结束了", "cursor-done-notify", "深色主题会跟着 Windows 设置走。", "共用 01:47 · 9 步 · 本轮约 $0.31", close, "done") { QuotaExpanded = true, Theme = "dark" }
                 };
-                foreach (Shot shot in shots)
+                bool english = L.English;
+                List<Shot> all = new List<Shot>(shots);
+                all.Add(new Shot("english", "done", "green", "All done", "cursor-done-notify", "Click the title to jump back to the chat.", "Took 02:04 · 11 steps · this turn ~$0.86",
+                    "Title: back to chat · elsewhere: close · 12s", "done") { QuotaExpanded = true, English = true });
+                foreach (Shot shot in all)
                 {
+                    L.English = shot.English;
                     form.Theme = shot.Theme;
                     form.HintAlert = shot.HintAlert;
                     form.Expanded = shot.Expanded;
@@ -522,6 +594,7 @@ namespace CursorDoneBuddy
                         Console.WriteLine(path);
                     }
                 }
+                L.English = english;
             }
         }
 
@@ -533,6 +606,7 @@ namespace CursorDoneBuddy
             public bool Expanded;
             public bool QuotaExpanded;
             public bool HintAlert;
+            public bool English;
 
             public Shot(string name, string phase, string accent, string headline, string activity, string detail, string meta, string hint, string pose)
             {
@@ -596,6 +670,8 @@ namespace CursorDoneBuddy
                 Alerts();
                 Focus();
                 Parsing();
+                English();
+                SettingsFile();
             }
             finally
             {
@@ -847,6 +923,60 @@ namespace CursorDoneBuddy
 
             Check(Text.Elapsed(DateTime.Now.AddMinutes(-59).AddSeconds(-40), DateTime.Now) == "59:40", "elapsed minutes must not round up");
             Check(Text.Elapsed(DateTime.Now.AddMinutes(-100), DateTime.Now).StartsWith("1:40:"), "elapsed hours must not round up");
+        }
+
+        static void English()
+        {
+            L.English = true;
+            try
+            {
+                BuddyState st = Fresh();
+                st.Apply(Ev("hook_event_name", "beforeSubmitPrompt", "conversation_id", "en", "generation_id", "en-g", "prompt", "hi"));
+                Check(st.Live.Headline == "Working" && st.Live.Activity == "Got your question", "English prompt state: " + st.Live.Activity);
+                Check(BuddyState.ToolPhrase("Read", true) == "Done reading", "English finished phrase: " + BuddyState.ToolPhrase("Read", true));
+                Check(BuddyState.ToolPhrase("Shell", false) == "Running a command", "English running phrase");
+                st.Apply(Ev("hook_event_name", "stop", "conversation_id", "en", "generation_id", "en-g", "status", "completed"));
+                string meta = st.MetaText(st.Live, DateTime.Now);
+                Check(st.Live.Headline == "All done" && meta.StartsWith("Took ") && meta.EndsWith(" steps"), "English finish: " + meta);
+            }
+            finally
+            {
+                L.English = false;
+            }
+            L.Apply("en");
+            Check(L.English, "explicit English");
+            L.Apply("zh");
+            Check(!L.English, "explicit Chinese");
+            L.English = false;
+        }
+
+        static void SettingsFile()
+        {
+            string path = Path.Combine(Path.GetTempPath(), "cursor-done-notify-settings-" + Guid.NewGuid().ToString("n") + ".txt");
+            try
+            {
+                BuddySettings saved = new BuddySettings();
+                saved.Mute = true;
+                saved.Quiet = false;
+                saved.Theme = "dark";
+                saved.Language = "en";
+                saved.Seconds = 20;
+                saved.StaleMinutes = 60;
+                saved.Save(path);
+                BuddySettings loaded = BuddySettings.Load(path);
+                Check(loaded.Mute && !loaded.Quiet && loaded.Quota && loaded.Theme == "dark" && loaded.Language == "en" && loaded.Seconds == 20 && loaded.StaleMinutes == 60, "settings round trip");
+                BuddyState st = Fresh();
+                st.ApplyTiming(loaded);
+                Check(st.DoneSeconds == 20 && st.StaleMinutes == 60, "menu timing wins");
+                loaded.Seconds = 500;
+                st.ApplyTiming(loaded);
+                Check(st.DoneSeconds == 60, "seconds are clamped");
+                Check(BuddySettings.Load(path + ".missing").Language == "auto", "defaults without a file");
+            }
+            finally
+            {
+                File.Delete(path);
+            }
         }
     }
 }

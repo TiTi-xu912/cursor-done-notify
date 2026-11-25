@@ -161,7 +161,7 @@ namespace CursorDoneBuddy
         {
             JavaScriptSerializer json = new JavaScriptSerializer();
             IDictionary usage = json.DeserializeObject(usageJson ?? "") as IDictionary;
-            if (usage == null) return QuotaSnapshot.Failure("用量接口返回了无法识别的内容", now);
+            if (usage == null) return QuotaSnapshot.Failure(L.T("用量接口返回了无法识别的内容", "The usage API returned something unexpected"), now);
 
             QuotaSnapshot s = new QuotaSnapshot();
             s.Ok = true;
@@ -220,7 +220,7 @@ namespace CursorDoneBuddy
             switch (membership.Trim().ToLowerInvariant())
             {
                 case "free": return "Free";
-                case "free_trial": return "Pro 试用";
+                case "free_trial": return L.T("Pro 试用", "Pro trial");
                 case "pro": return "Pro";
                 case "pro_plus": return "Pro+";
                 case "ultra": return "Ultra";
@@ -375,16 +375,16 @@ namespace CursorDoneBuddy
             {
                 if (string.IsNullOrEmpty(DatabasePath) || !File.Exists(DatabasePath))
                 {
-                    return QuotaSnapshot.Failure("没找到 Cursor 的登录数据", now);
+                    return QuotaSnapshot.Failure(L.T("没找到 Cursor 的登录数据", "No Cursor sign-in data found"), now);
                 }
                 token = StateDb.Read(DatabasePath, "cursorAuth/accessToken");
                 membership = StateDb.Read(DatabasePath, "cursorAuth/stripeMembershipType");
             }
             catch (Exception ex)
             {
-                return QuotaSnapshot.Failure("读不到 Cursor 登录数据：" + ex.Message, now);
+                return QuotaSnapshot.Failure(L.T("读不到 Cursor 登录数据：", "Cannot read Cursor sign-in data: ") + ex.Message, now);
             }
-            if (string.IsNullOrEmpty(token)) return QuotaSnapshot.Failure("Cursor 还没有登录", now);
+            if (string.IsNullOrEmpty(token)) return QuotaSnapshot.Failure(L.T("Cursor 还没有登录", "Cursor is not signed in"), now);
 
             try
             {
@@ -405,13 +405,13 @@ namespace CursorDoneBuddy
                 HttpWebResponse response = ex.Response as HttpWebResponse;
                 if (response != null && (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden))
                 {
-                    return QuotaSnapshot.Failure("登录已过期，打开 Cursor 会自动续上", now);
+                    return QuotaSnapshot.Failure(L.T("登录已过期，打开 Cursor 会自动续上", "Sign-in expired; opening Cursor renews it"), now);
                 }
-                return QuotaSnapshot.Failure("网络不通：" + ex.Message, now);
+                return QuotaSnapshot.Failure(L.T("网络不通：", "Network error: ") + ex.Message, now);
             }
             catch (Exception ex)
             {
-                return QuotaSnapshot.Failure("额度解析失败：" + ex.Message, now);
+                return QuotaSnapshot.Failure(L.T("额度解析失败：", "Could not read usage: ") + ex.Message, now);
             }
         }
 
@@ -484,7 +484,7 @@ namespace CursorDoneBuddy
             if (sqlite3_open_v2(Utf8z(path), out db, OpenReadOnly, IntPtr.Zero) != SqliteOk)
             {
                 if (db != IntPtr.Zero) sqlite3_close(db);
-                throw new IOException("无法打开 state.vscdb");
+                throw new IOException(L.T("无法打开 state.vscdb", "cannot open state.vscdb"));
             }
             try
             {
@@ -492,7 +492,7 @@ namespace CursorDoneBuddy
                 IntPtr statement;
                 if (sqlite3_prepare_v2(db, Utf8z("SELECT value FROM ItemTable WHERE key = ?1"), -1, out statement, IntPtr.Zero) != SqliteOk)
                 {
-                    throw new IOException("state.vscdb 结构不认识");
+                    throw new IOException(L.T("state.vscdb 结构不认识", "unrecognized state.vscdb layout"));
                 }
                 try
                 {

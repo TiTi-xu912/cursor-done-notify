@@ -17,6 +17,11 @@ namespace CursorDoneBuddy
         {
             return English ? en : zh;
         }
+
+        public static void Apply(string setting)
+        {
+            English = setting == "en" || (setting != "zh" && CultureInfo.CurrentUICulture.TwoLetterISOLanguageName != "zh");
+        }
     }
 
     static class Text
@@ -199,6 +204,12 @@ namespace CursorDoneBuddy
         public bool Quota = true;
         public bool Quiet = true;
         public string Theme = "auto";
+        public string Language = "auto";
+        public int Seconds;
+        public int StaleMinutes;
+
+        public static readonly int[] SecondChoices = { 6, 12, 20, 30 };
+        public static readonly int[] StaleChoices = { 30, 60, 180, 360 };
 
         public static string DefaultPath()
         {
@@ -223,6 +234,9 @@ namespace CursorDoneBuddy
                         case "quota": settings.Quota = value != "0"; break;
                         case "quiet": settings.Quiet = value != "0"; break;
                         case "theme": if (value == "light" || value == "dark") settings.Theme = value; break;
+                        case "language": if (value == "zh" || value == "en") settings.Language = value; break;
+                        case "seconds": int.TryParse(value, out settings.Seconds); break;
+                        case "stale": int.TryParse(value, out settings.StaleMinutes); break;
                     }
                 }
             }
@@ -236,7 +250,9 @@ namespace CursorDoneBuddy
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
-                string text = "mute=" + (Mute ? "1" : "0") + "\nquota=" + (Quota ? "1" : "0") + "\nquiet=" + (Quiet ? "1" : "0") + "\ntheme=" + Theme + "\n";
+                string text = "mute=" + (Mute ? "1" : "0") + "\nquota=" + (Quota ? "1" : "0") + "\nquiet=" + (Quiet ? "1" : "0") +
+                    "\ntheme=" + Theme + "\nlanguage=" + Language +
+                    "\nseconds=" + Seconds.ToString(CultureInfo.InvariantCulture) + "\nstale=" + StaleMinutes.ToString(CultureInfo.InvariantCulture) + "\n";
                 File.WriteAllText(path, text, new UTF8Encoding(false));
             }
             catch (IOException) { }
@@ -270,9 +286,15 @@ namespace CursorDoneBuddy
         public static BuddyState FromEnvironment()
         {
             BuddyState state = new BuddyState();
-            state.DoneSeconds = EnvInt("CURSOR_NOTIFY_SECONDS", 12, 3, 60);
-            state.StaleMinutes = EnvInt("CURSOR_NOTIFY_STALE_MINUTES", 180, 10, 1440);
+            state.ApplyTiming(new BuddySettings());
             return state;
+        }
+
+        // A choice made in the menu wins over the older environment variables.
+        public void ApplyTiming(BuddySettings settings)
+        {
+            DoneSeconds = settings.Seconds > 0 ? Math.Max(3, Math.Min(60, settings.Seconds)) : EnvInt("CURSOR_NOTIFY_SECONDS", 12, 3, 60);
+            StaleMinutes = settings.StaleMinutes > 0 ? Math.Max(10, Math.Min(1440, settings.StaleMinutes)) : EnvInt("CURSOR_NOTIFY_STALE_MINUTES", 180, 10, 1440);
         }
 
         static int EnvInt(string name, int fallback, int min, int max)

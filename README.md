@@ -1,6 +1,8 @@
 # 点点
 
-A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent turn through Cursor hooks and stays on screen while the agent reads, edits, and runs commands. When the turn finishes, it plays a sound and shows a short snippet of the reply.
+A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent turn through Cursor hooks and stays on screen while the agent reads, edits, and runs commands. When the turn finishes, it plays a sound and shows a short snippet of the reply. A bar at the bottom shows your Cursor usage for the billing cycle. The UI follows the Windows display language (Chinese or English) and can be switched from the right-click menu.
+
+<img src="docs/screenshots/english.png" width="320" alt="English UI">
 
 点点是 Cursor Agent 的 Windows 桌面伙伴：一个戴耳机、穿卫衣的 Q 版程序员。Agent 开始干活后，它出现在桌面右下角，跟着读文件、改代码、跑命令换动作；这一轮结束、中断或出错时响一声，并带上回答摘要。多个对话同时进行时，它收成一张总览。气泡底部常驻一条 Cursor 额度栏，点开能看本期用量详情。
 
@@ -81,19 +83,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnableRealtim
 - 这一轮结束、中断或出错后，点窗口就能关掉；也可以等它自己消失。
 - 右上角的关闭同样有效。
 - 好几个对话同时在跑时，窗口变成总览。点一行就盯住这一路，并尝试把对应工作区的 Cursor 窗口调到前面；再点一次回到总览。已经结束的那一行，点一下就从总览里去掉。
-- 右键点窗口，或者点任务栏托盘里的点点图标，会弹出菜单：静音、正看着对话时不打扰、显示额度栏、主题（跟随系统、浅色、深色）、打开 Cursor 用量页、先关掉点点。这些选择保存在 `%APPDATA%\cursor-done-notify\settings.txt`，立即生效，不用重启 Cursor。
+- 右键点窗口，或者点任务栏托盘里的点点图标，会弹出菜单：静音、正看着对话时不打扰、显示额度栏、主题（跟随系统、浅色、深色）、结束后停留多久、多久没动静算失联、语言（跟随系统、中文、English）、打开 Cursor 用量页、先关掉点点。这些选择保存在 `%APPDATA%\cursor-done-notify\settings.txt`，立即生效，不用重启 Cursor。
 
 结束时的声音沿用 Windows 系统音：正常完成、中断、出错各一声。静音后不再响。如果一轮结束时你正看着这个对话（前台就是跑它的终端或 Cursor 窗口），默认不响，气泡 4 秒后就收起。
 
 主题默认跟随 Windows 的“应用模式”，深色模式下气泡变深。
 
-默认停留 12 秒。要改的话，设置用户环境变量 `CURSOR_NOTIFY_SECONDS`（允许 3 到 60），然后完全退出 Cursor 再打开：
+默认停留 12 秒，可以在右键菜单的“结束后停留”里改。也可以设置用户环境变量 `CURSOR_NOTIFY_SECONDS`（允许 3 到 60），菜单里选过的值优先：
 
 ```powershell
 [Environment]::SetEnvironmentVariable('CURSOR_NOTIFY_SECONDS', '20', 'User')
 ```
 
-如果 Cursor 意外退出，长时间收不到事件的会话默认会在 180 分钟后标成“会话失去连接”。可以通过 `CURSOR_NOTIFY_STALE_MINUTES` 调整为 10 到 1440 分钟：
+如果 Cursor 意外退出，长时间收不到事件的会话默认会在 180 分钟后标成“会话失去连接”。可以在右键菜单的“多久没动静算失联”里改，或者用 `CURSOR_NOTIFY_STALE_MINUTES` 调整为 10 到 1440 分钟：
 
 ```powershell
 [Environment]::SetEnvironmentVariable('CURSOR_NOTIFY_STALE_MINUTES', '60', 'User')

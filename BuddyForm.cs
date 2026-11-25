@@ -744,21 +744,21 @@ namespace CursorDoneBuddy
             List<QuotaRow> rows = new List<QuotaRow>();
             QuotaSnapshot s = _quota.Latest;
             QuotaRow head = new QuotaRow();
-            head.Label = "额度";
+            head.Label = L.T("额度", "Usage");
             rows.Add(head);
             if (s == null)
             {
-                head.Text = "正在读取…";
+                head.Text = L.T("正在读取…", "Loading…");
                 return rows;
             }
             if (!s.Ok)
             {
-                head.Text = "暂时取不到";
-                head.Right = _quotaExpanded ? "" : "点开看原因";
+                head.Text = L.T("暂时取不到", "Unavailable");
+                head.Right = _quotaExpanded ? "" : L.T("点开看原因", "click for why");
                 if (_quotaExpanded)
                 {
                     rows.Add(QuotaRow.Note(s.Error, true));
-                    rows.Add(QuotaRow.Note("尝试于 " + s.FetchedAt.ToString("HH:mm") + " · 点这里收起", false));
+                    rows.Add(QuotaRow.Note(L.T("尝试于 ", "Tried at ") + s.FetchedAt.ToString("HH:mm") + L.T(" · 点这里收起", " · click to collapse"), false));
                 }
                 return rows;
             }
@@ -769,7 +769,7 @@ namespace CursorDoneBuddy
             head.Text = QuotaSnapshot.Percent(headline);
             List<string> right = new List<string>();
             if (!_quotaExpanded && s.ApiPercent >= 0) right.Add("API " + QuotaSnapshot.Percent(s.ApiPercent));
-            if (days >= 0) right.Add(_quotaExpanded ? days + " 天后重置" : "剩 " + days + " 天");
+            if (days >= 0) right.Add(_quotaExpanded ? L.T(days + " 天后重置", "resets in " + days + "d") : L.T("剩 " + days + " 天", days + "d left"));
             head.Right = string.Join(" · ", right.ToArray());
             if (!_quotaExpanded) return rows;
 
@@ -778,27 +778,27 @@ namespace CursorDoneBuddy
             {
                 period = s.CycleStart.ToString("MM/dd") + " – " + s.CycleEnd.ToString("MM/dd");
             }
-            string plan = string.IsNullOrEmpty(s.PlanName) ? "本期" : s.PlanName + " 套餐";
+            string plan = string.IsNullOrEmpty(s.PlanName) ? L.T("本期", "This cycle") : s.PlanName + L.T(" 套餐", " plan");
             rows.Add(QuotaRow.Note(string.IsNullOrEmpty(period) ? plan : plan + " · " + period, false));
             if (s.AutoPercent >= 0) rows.Add(QuotaRow.Meter("Auto", s.AutoPercent));
             if (s.ApiPercent >= 0) rows.Add(QuotaRow.Meter("API", s.ApiPercent));
 
             List<string> spend = new List<string>();
-            if (s.IncludedSpendCents >= 0 && s.LimitCents > 0) spend.Add("套餐内 " + QuotaSnapshot.Money(s.IncludedSpendCents) + " / " + QuotaSnapshot.Money(s.LimitCents));
-            else if (s.TotalSpendCents >= 0) spend.Add("已用 " + QuotaSnapshot.Money(s.TotalSpendCents));
-            if (s.BonusSpendCents > 0) spend.Add("赠送 " + QuotaSnapshot.Money(s.BonusSpendCents));
+            if (s.IncludedSpendCents >= 0 && s.LimitCents > 0) spend.Add(L.T("套餐内 ", "Included ") + QuotaSnapshot.Money(s.IncludedSpendCents) + " / " + QuotaSnapshot.Money(s.LimitCents));
+            else if (s.TotalSpendCents >= 0) spend.Add(L.T("已用 ", "Used ") + QuotaSnapshot.Money(s.TotalSpendCents));
+            if (s.BonusSpendCents > 0) spend.Add(L.T("赠送 ", "Bonus ") + QuotaSnapshot.Money(s.BonusSpendCents));
             if (spend.Count > 0) rows.Add(QuotaRow.Note(string.Join(" · ", spend.ToArray()), false));
 
             if (s.OnDemandLimitCents > 0)
             {
-                QuotaRow onDemand = QuotaRow.Meter("按需", s.OnDemandUsedCents * 100.0 / s.OnDemandLimitCents);
+                QuotaRow onDemand = QuotaRow.Meter(L.T("按需", "Extra"), s.OnDemandUsedCents * 100.0 / s.OnDemandLimitCents);
                 onDemand.Text = QuotaSnapshot.Money(s.OnDemandUsedCents) + " / " + QuotaSnapshot.Money(s.OnDemandLimitCents);
                 rows.Add(onDemand);
             }
 
-            string footer = "更新于 " + s.FetchedAt.ToString("HH:mm");
-            if (!string.IsNullOrEmpty(s.Error)) footer += " · 刷新失败";
-            rows.Add(QuotaRow.Note(footer + " · 点这里收起", !string.IsNullOrEmpty(s.Error)));
+            string footer = L.T("更新于 ", "Updated ") + s.FetchedAt.ToString("HH:mm");
+            if (!string.IsNullOrEmpty(s.Error)) footer += L.T(" · 刷新失败", " · refresh failed");
+            rows.Add(QuotaRow.Note(footer + L.T(" · 点这里收起", " · click to collapse"), !string.IsNullOrEmpty(s.Error)));
             return rows;
         }
 
@@ -823,7 +823,7 @@ namespace CursorDoneBuddy
                     float x = area.X;
                     if (!string.IsNullOrEmpty(row.Label))
                     {
-                        float lw = Px(36);
+                        float lw = Px(L.English ? 46 : 36);
                         g.DrawString(row.Label, _fontHint, muted, new RectangleF(x, y, lw, rowH), _single);
                         x += lw;
                     }
