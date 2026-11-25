@@ -25,7 +25,7 @@ function Get-SettingsPath {
 }
 
 function Read-Settings {
-    $settings = @{ Mute = $false; Quota = $true; Theme = 'auto' }
+    $settings = @{ Mute = $false; Quota = $true; Theme = 'auto'; Quiet = $true }
     $path = Get-SettingsPath
     if (Test-Path -LiteralPath $path) {
         try {
@@ -35,6 +35,7 @@ function Read-Settings {
                 switch ($pair[0].Trim()) {
                     'mute' { $settings.Mute = $pair[1].Trim() -eq '1' }
                     'quota' { $settings.Quota = $pair[1].Trim() -ne '0' }
+                    'quiet' { $settings.Quiet = $pair[1].Trim() -ne '0' }
                     'theme' {
                         $theme = $pair[1].Trim()
                         if ($theme -eq 'light' -or $theme -eq 'dark') { $settings.Theme = $theme }
@@ -50,7 +51,8 @@ function Read-Settings {
 function Save-Settings($Settings) {
     $mute = if ($Settings.Mute) { '1' } else { '0' }
     $quota = if ($Settings.Quota) { '1' } else { '0' }
-    $text = "mute=$mute`nquota=$quota`ntheme=$($Settings.Theme)`n"
+    $quiet = if ($Settings.Quiet) { '1' } else { '0' }
+    $text = "mute=$mute`nquota=$quota`nquiet=$quiet`ntheme=$($Settings.Theme)`n"
     try {
         Write-Utf8File (Get-SettingsPath) $text
     } catch {
@@ -96,6 +98,18 @@ function Test-NeedsSpendSample {
         $bag = $script:Sessions[$key]
         if (-not $bag) { continue }
         if ($bag.Phase -ne 'done' -and $bag.StartedAt -and $bag.SpendStart -lt 0) { return $true }
+    }
+    return $false
+}
+
+# Cursor books the last requests a few seconds late, so keep sampling briefly after the turn ends.
+function Test-NeedsSpendFollowUp($Snapshot) {
+    $now = Get-Date
+    foreach ($key in @($script:SessionOrder)) {
+        $bag = $script:Sessions[$key]
+        if (-not $bag -or $bag.Phase -ne 'done' -or -not $bag.DoneAt -or $bag.SpendStart -lt 0) { continue }
+        if ($now -ge $bag.DoneAt.AddSeconds(15)) { continue }
+        if (-not $Snapshot -or $Snapshot.FetchedAt -lt $bag.DoneAt.AddSeconds(5)) { return $true }
     }
     return $false
 }
@@ -400,6 +414,8 @@ function Reset-Fields {
     $script:SpendEnd = -1
     $script:SpendShared = $false
     $script:DoneAt = $null
+    $script:HostWindow = 0
+    $script:HostProcess = ''
     $script:UpdatedAt = Get-Date
 }
 
@@ -423,7 +439,7 @@ function Initialize-State {
         'StartedAt', 'StepStartedAt', 'Steps', 'History', 'DoneUntil', 'SettleUntil',
         'SoundPlayed', 'SoundPending', 'Summary', 'StopSeen', 'AnswerSeen', 'OpenTools', 'OpenSubagents',
         'OpenToolIds', 'CompletedToolIds', 'RetiredGenerations', 'GenerationId', 'UpdatedAt', 'WorkspaceRoot',
-        'SpendStart', 'SpendEnd', 'SpendShared', 'DoneAt'
+        'SpendStart', 'SpendEnd', 'SpendShared', 'DoneAt', 'HostWindow', 'HostProcess'
     )
     $script:DozeSeconds = 90
     $script:QuotaNotice = ''
@@ -802,17 +818,63 @@ function Get-WorkspaceRoot($Payload) {
     return ''
 }
 
-function Show-SessionWindow($Bag) {
+function Get-WorkspaceLeaf($Bag) {
     if (-not $Bag -or [string]::IsNullOrWhiteSpace([string]$Bag.WorkspaceRoot)) {
+        return ''
+    }
+    return (Split-Path -Leaf ([string]$Bag.WorkspaceRoot))
+}
+
+function Get-ForegroundWindowInfo {
+    if ('CursorDoneBuddy.DesktopWindows' -as [type]) {
+        return [CursorDoneBuddy.DesktopWindows]::Foreground()
+    }
+    return @('', '', '0')
+}
+
+# A terminal running the Cursor CLI is identified by its window handle; Cursor itself
+# can have several windows for one process, so it is matched by the workspace name.
+function Test-TerminalHost($Bag) {
+    return ($Bag -and $Bag.HostWindow -and [string]$Bag.HostProcess -ne 'Cursor')
+}
+
+function Test-SessionFocused($Bag) {
+    $info = @(Get-ForegroundWindowInfo)
+    if ($info.Count -lt 3) {
+        return $false
+    }
+    if (Test-TerminalHost $Bag) {
+        return ([string]$info[2] -eq [string]$Bag.HostWindow)
+    }
+    $leaf = Get-WorkspaceLeaf $Bag
+    if (-not $leaf) {
+        return $false
+    }
+    return ([string]$info[0] -eq 'Cursor' -and
+        ([string]$info[1]).IndexOf($leaf, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
+function Test-CanJump($Bag) {
+    return ((Test-TerminalHost $Bag) -or (Get-WorkspaceLeaf $Bag))
+}
+
+function Show-SessionWindow($Bag) {
+    $windows = 'CursorDoneBuddy.DesktopWindows' -as [type]
+    if ((Test-TerminalHost $Bag) -and $windows -and [CursorDoneBuddy.DesktopWindows]::ActivateHandle([long]$Bag.HostWindow)) {
         return
     }
-    $cursor = $null
+    $leaf = Get-WorkspaceLeaf $Bag
+    if (-not $leaf) {
+        return
+    }
+    if ($windows -and [CursorDoneBuddy.DesktopWindows]::Activate('Cursor', $leaf)) {
+        return
+    }
     $cmd = Get-Command cursor -ErrorAction SilentlyContinue
-    if ($cmd) { $cursor = $cmd.Source }
-    if ([string]::IsNullOrWhiteSpace($cursor)) {
+    if (-not $cmd) {
         return
     }
-    Start-Process -FilePath $cursor -ArgumentList @('-r', '--suppress-popups-on-startup', [string]$Bag.WorkspaceRoot) | Out-Null
+    Start-Process -FilePath $cmd.Source -ArgumentList @(('"' + [string]$Bag.WorkspaceRoot + '"')) | Out-Null
 }
 
 function Get-SessionLabel($Bag, [string]$Key) {
@@ -1061,7 +1123,18 @@ function Play-PendingSounds {
         }
     }
     if (-not $chosen) { return }
-    if (-not $script:Settings.Mute) {
+    $quiet = $script:Settings.Quiet -and (Test-SessionFocused $chosen)
+    if ($quiet) {
+        $soon = (Get-Date).AddSeconds(4)
+        foreach ($key in @($script:SessionOrder)) {
+            $bag = $script:Sessions[$key]
+            if (-not $bag.SoundPending -or ($bag.DoneUntil -and $bag.DoneUntil -le $soon)) { continue }
+            $bag.DoneUntil = $soon
+            $script:Sessions[$key] = $bag
+            if ($script:SessionKey -eq $key) { $script:DoneUntil = $soon }
+        }
+    }
+    if (-not $script:Settings.Mute -and -not $quiet) {
         if ($chosen.Accent -eq 'red') {
             [System.Media.SystemSounds]::Hand.Play()
         } elseif ($chosen.Accent -eq 'orange') {
@@ -1194,6 +1267,11 @@ function Apply-Event($Payload, [string]$Raw) {
                 $prompt = Get-JsonField $Raw 'prompt'
             }
             $script:Prompt = Shorten $prompt 60
+            $hostWindow = [long]0
+            if ($Payload -and $Payload.host_window -and [long]::TryParse([string]$Payload.host_window, [ref]$hostWindow)) {
+                $script:HostWindow = $hostWindow
+                $script:HostProcess = [string]$Payload.host_process
+            }
             $script:Headline = '正在处理'
             $script:Activity = '已收到问题'
             $script:Detail = ''
@@ -1460,15 +1538,18 @@ function Get-MetaText {
 }
 
 function Get-Hint {
+    $jump = Test-CanJump @{ HostWindow = $script:HostWindow; HostProcess = $script:HostProcess; WorkspaceRoot = $script:WorkspaceRoot }
     if ($script:Phase -eq 'done' -and $script:DoneUntil) {
         $left = [int][Math]::Ceiling(($script:DoneUntil - (Get-Date)).TotalSeconds)
         if ($left -lt 1) { $left = 1 }
+        if ($jump) { return ('点标题跳回对话 · 点别处关掉 · ' + $left + 's') }
         return ('点一下关掉 · ' + $left + 's')
     }
     if ($script:Phase -eq 'settling') {
         return '回复已经写好了'
     }
     if ($script:Phase -eq 'running') {
+        if ($jump) { return '点标题跳回对话 · 点别处看步骤' }
         return '点一下可以看步骤'
     }
     return '等你发来问题'
@@ -1640,6 +1721,11 @@ if ($env:CURSOR_NOTIFY_SELFTEST -eq '1') {
     Apply-Event ([pscustomobject]@{ hook_event_name = 'stop'; conversation_id = 'spend'; generation_id = 'spend-g'; status = 'completed' }) ''
     Update-TurnSpend ([pscustomobject]@{ Ok = $true; TotalSpendCents = 1042; FetchedAt = (Get-Date).AddSeconds(1) })
     if ((Get-MetaText) -notmatch '本轮约 \$0\.42') { throw "turn spend: $(Get-MetaText)" }
+    if (-not (Test-NeedsSpendFollowUp ([pscustomobject]@{ FetchedAt = (Get-Date).AddSeconds(1) }))) { throw 'a fresh finish should keep sampling spend' }
+    if (Test-NeedsSpendFollowUp ([pscustomobject]@{ FetchedAt = (Get-Date).AddSeconds(6) })) { throw 'a late enough sample should stop the follow-up' }
+    Save-CurrentSession
+    $script:Sessions['spend'].DoneAt = (Get-Date).AddSeconds(-20)
+    if (Test-NeedsSpendFollowUp $null) { throw 'follow-up must give up after 15 seconds' }
 
     Initialize-State
     Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'stale-baseline'; generation_id = 'sb'; prompt = '旧数据' }) ''
@@ -1666,6 +1752,31 @@ if ($env:CURSOR_NOTIFY_SELFTEST -eq '1') {
     } finally {
         Remove-Item -LiteralPath $script:QuotaAlertPath -Force -ErrorAction SilentlyContinue
     }
+
+    Initialize-State
+    $script:Settings.Mute = $false
+    $script:Settings.Quiet = $true
+    function Get-ForegroundWindowInfo { return @('Cursor', 'login.cs - demo - Cursor', '42') }
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'quiet'; generation_id = 'quiet-g'; prompt = '安静'; workspace_roots = @('D:\work\demo') }) ''
+    if ((Get-Hint) -notmatch '点标题跳回对话') { throw "hint should offer the jump: $(Get-Hint)" }
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'stop'; conversation_id = 'quiet'; generation_id = 'quiet-g'; status = 'completed' }) ''
+    Play-PendingSounds
+    if ($script:SoundPending -or -not $script:SoundPlayed) { throw 'quiet finish should still settle the sound flag' }
+    if ((($script:DoneUntil - (Get-Date)).TotalSeconds) -gt 5) { throw 'a focused finish should leave quickly' }
+    function Get-ForegroundWindowInfo { return @('Cursor', 'other.cs - another-project - Cursor', '43') }
+    if (Test-SessionFocused $script:Sessions['quiet']) { throw 'another Cursor window is not this session' }
+
+    Initialize-State
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'cli'; generation_id = 'cli-g'; prompt = '终端'; host_window = '134608'; host_process = 'WindowsTerminal' }) ''
+    Save-CurrentSession
+    $bag = $script:Sessions['cli']
+    if ($bag.HostWindow -ne 134608 -or $bag.HostProcess -ne 'WindowsTerminal') { throw 'host window was not recorded' }
+    if (-not (Test-CanJump $bag)) { throw 'a terminal session without workspace roots can still jump' }
+    function Get-ForegroundWindowInfo { return @('WindowsTerminal', 'Some chat title', '134608') }
+    if (-not (Test-SessionFocused $bag)) { throw 'the terminal window running the agent counts as focused' }
+    function Get-ForegroundWindowInfo { return @('WindowsTerminal', 'Some chat title', '999') }
+    if (Test-SessionFocused $bag) { throw 'another terminal window is not this session' }
+    function Get-ForegroundWindowInfo { return @('', '', '0') }
 
     Write-Output 'SELFTEST OK'
     exit 0
@@ -1700,18 +1811,18 @@ if ($env:CURSOR_NOTIFY_PREVIEW -eq '1') {
     $steps = "已收到问题`n已完成读取 progress-host.ps1`n正在思考`n已完成修改 BuddyForm.cs`n正在执行命令 tests\hooks.ps1"
     $board = "bad|b|看报表 · 出错`nrun|a|修登录 · 正在读取 · login.cs`ndone|c|写说明 · 已完成"
     $shots = @(
-        @{ Name = 'think'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在思考'; Detail = ''; Meta = '已用 00:08 · 第 1 步'; Hint = '点一下可以看步骤'; Pose = 'think' },
-        @{ Name = 'read'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在读取'; Detail = 'progress-host.ps1'; Meta = '已用 01:12 · 第 4 步 · cursor-done-notify'; Hint = '点一下可以看步骤'; Pose = 'read' },
-        @{ Name = 'terminal'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在执行命令'; Detail = 'npm test'; Meta = '已用 00:40 · 第 2 步'; Hint = '点一下可以看步骤'; Pose = 'terminal' },
-        @{ Name = 'write'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在修改'; Detail = 'BuddyForm.cs'; Meta = '已用 01:40 · 第 6 步'; Hint = '点一下可以看步骤'; Pose = 'write' },
-        @{ Name = 'search'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在搜索'; Detail = 'pose'; Meta = '已用 00:20 · 第 3 步'; Hint = '点一下可以看步骤'; Pose = 'search' },
-        @{ Name = 'steps'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在执行命令'; Detail = 'tests\hooks.ps1'; Meta = '已用 02:31 · 第 9 步'; Hint = '点一下可以看步骤'; Pose = 'terminal'; History = $steps; Expanded = $true },
-        @{ Name = 'done'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '点一下就能关掉这个小家伙。'; Meta = '共用 02:04 · 11 步'; Hint = '点一下关掉 · 12s'; Pose = 'done' },
-        @{ Name = 'error'; Phase = 'done'; Accent = 'red'; Headline = '这一轮出错了'; Activity = '可以回到对话里看'; Detail = '有一步没有成功'; Meta = '共用 00:40 · 3 步'; Hint = '点一下关掉 · 12s'; Pose = 'error' },
+        @{ Name = 'think'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在思考'; Detail = ''; Meta = '已用 00:08 · 第 1 步'; Hint = '点标题跳回对话 · 点别处看步骤'; Pose = 'think' },
+        @{ Name = 'read'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在读取'; Detail = 'progress-host.ps1'; Meta = '已用 01:12 · 第 4 步 · cursor-done-notify'; Hint = '点标题跳回对话 · 点别处看步骤'; Pose = 'read' },
+        @{ Name = 'terminal'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在执行命令'; Detail = 'npm test'; Meta = '已用 00:40 · 第 2 步'; Hint = '点标题跳回对话 · 点别处看步骤'; Pose = 'terminal' },
+        @{ Name = 'write'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在修改'; Detail = 'BuddyForm.cs'; Meta = '已用 01:40 · 第 6 步'; Hint = '点标题跳回对话 · 点别处看步骤'; Pose = 'write' },
+        @{ Name = 'search'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在搜索'; Detail = 'pose'; Meta = '已用 00:20 · 第 3 步'; Hint = '点标题跳回对话 · 点别处看步骤'; Pose = 'search' },
+        @{ Name = 'steps'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在执行命令'; Detail = 'tests\hooks.ps1'; Meta = '已用 02:31 · 第 9 步'; Hint = '点标题跳回对话 · 点别处看步骤'; Pose = 'terminal'; History = $steps; Expanded = $true },
+        @{ Name = 'done'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '点一下就能关掉这个小家伙。'; Meta = '共用 02:04 · 11 步'; Hint = '点标题跳回对话 · 点别处关掉 · 12s'; Pose = 'done' },
+        @{ Name = 'error'; Phase = 'done'; Accent = 'red'; Headline = '这一轮出错了'; Activity = '可以回到对话里看'; Detail = '有一步没有成功'; Meta = '共用 00:40 · 3 步'; Hint = '点标题跳回对话 · 点别处关掉 · 12s'; Pose = 'error' },
         @{ Name = 'board'; Phase = 'running'; Accent = 'red'; Headline = '1 个进行中 · 1 个出错 · 1 个已完成'; Activity = ''; Detail = ''; Meta = '共 3 个会话'; Hint = '点一行只处理这一路'; Pose = 'error'; History = $board },
-        @{ Name = 'quota'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '额度栏点一下就能展开详情。'; Meta = '共用 03:12 · 14 步 · 本轮约 $0.86'; Hint = '点一下关掉 · 12s'; Pose = 'done'; QuotaExpanded = $true },
+        @{ Name = 'quota'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '额度栏点一下就能展开详情。'; Meta = '共用 03:12 · 14 步 · 本轮约 $0.86'; Hint = '点标题跳回对话 · 点别处关掉 · 12s'; Pose = 'done'; QuotaExpanded = $true },
         @{ Name = 'alert'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在查找资料'; Detail = 'docs.cursor.com'; Meta = '已用 00:52 · 第 5 步'; Hint = '本期 API 额度已用 85%'; HintAlert = $true; Pose = 'web' },
-        @{ Name = 'dark'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '深色主题会跟着 Windows 设置走。'; Meta = '共用 01:47 · 9 步 · 本轮约 $0.31'; Hint = '点一下关掉 · 12s'; Pose = 'done'; QuotaExpanded = $true; Theme = 'dark' }
+        @{ Name = 'dark'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '深色主题会跟着 Windows 设置走。'; Meta = '共用 01:47 · 9 步 · 本轮约 $0.31'; Hint = '点标题跳回对话 · 点别处关掉 · 12s'; Pose = 'done'; QuotaExpanded = $true; Theme = 'dark' }
     )
     foreach ($shot in $shots) {
         $history = ''
@@ -1774,6 +1885,7 @@ try {
             $script:Buddy.Quota = $null
         }
         $script:MuteItem.Checked = [bool]$script:Settings.Mute
+        $script:QuietItem.Checked = [bool]$script:Settings.Quiet
         $script:QuotaItem.Checked = [bool]($script:Quota -and $script:Settings.Quota)
         foreach ($item in $script:ThemeItem.DropDownItems) {
             $item.Checked = ([string]$item.Tag -eq [string]$script:Settings.Theme)
@@ -1809,6 +1921,12 @@ try {
         Save-Settings $script:Settings
         Apply-Settings
     })
+    $script:QuietItem = New-Object System.Windows.Forms.ToolStripMenuItem '正看着对话时不打扰'
+    $script:QuietItem.Add_Click({
+        $script:Settings.Quiet = -not $script:Settings.Quiet
+        Save-Settings $script:Settings
+        Apply-Settings
+    })
     $script:QuotaItem = New-Object System.Windows.Forms.ToolStripMenuItem '显示额度栏'
     $script:QuotaItem.Enabled = [bool]$script:Quota
     $script:QuotaItem.Add_Click({
@@ -1837,6 +1955,7 @@ try {
         $script:Buddy.Close()
     })
     [void]$script:Menu.Items.Add($script:MuteItem)
+    [void]$script:Menu.Items.Add($script:QuietItem)
     [void]$script:Menu.Items.Add($script:QuotaItem)
     [void]$script:Menu.Items.Add($script:ThemeItem)
     [void]$script:Menu.Items.Add($usageItem)
@@ -1852,6 +1971,12 @@ try {
     Apply-Settings
     $script:Buddy.Add_DismissRequested({
         $script:Buddy.Close()
+    })
+    $script:Buddy.Add_FocusRequested({
+        Save-CurrentSession
+        if ($script:SessionKey -and $script:Sessions.ContainsKey($script:SessionKey)) {
+            Show-SessionWindow $script:Sessions[$script:SessionKey]
+        }
     })
     $script:Buddy.Add_SessionActivated({
         Invoke-SessionClick ([string]$script:Buddy.ActivatedSessionKey)
@@ -1882,7 +2007,9 @@ try {
                         Update-QuotaAlert $snapshot
                     }
                 }
-                if (Test-NeedsSpendSample) {
+                if (Test-NeedsSpendFollowUp $script:Quota.Latest) {
+                    $script:Quota.RequestRefresh($true)
+                } elseif (Test-NeedsSpendSample) {
                     $script:Quota.RequestRefresh()
                 }
             }
@@ -1912,6 +2039,7 @@ try {
             if ($signature -ne $script:LastSignature) {
                 $script:LastSignature = $signature
                 $script:Buddy.HintAlert = $hintAlert
+                $script:Buddy.CanFocusSession = $script:SessionOrder.Count -le 1 -and [bool](Test-CanJump @{ HostWindow = $script:HostWindow; HostProcess = $script:HostProcess; WorkspaceRoot = $script:WorkspaceRoot })
                 $script:Buddy.SetContent(
                     [string]$view.Phase,
                     [string]$view.Accent,

@@ -26,8 +26,30 @@ if (-not (Test-Path -LiteralPath $csc)) {
     $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
 }
 $relay = Join-Path $installRoot 'hook-relay.exe'
-& $csc /nologo /warn:4 /target:exe "/out:$relay" (Join-Path $installRoot 'HookRelay.cs')
+& $csc /nologo /warn:4 /codepage:65001 /target:exe "/out:$relay" (Join-Path $installRoot 'HookRelay.cs')
 if ($LASTEXITCODE -ne 0) { throw 'test relay compile failed' }
+
+$savedTemp = $env:TEMP
+$savedTmp = $env:TMP
+$env:TEMP = $fakeHome
+$env:TMP = $fakeHome
+try {
+    $reply = '{"hook_event_name":"beforeSubmitPrompt","conversation_id":"t","prompt":"hi"}' | & $relay continue
+    if ($reply -ne '{"continue":true}') { throw "relay reply: $reply" }
+    '{"hook_event_name":"stop","conversation_id":"t","status":"completed"}' | & $relay empty | Out-Null
+} finally {
+    $env:TEMP = $savedTemp
+    $env:TMP = $savedTmp
+}
+$inbox = Join-Path $fakeHome 'cursor-done-notify\inbox'
+$events = @(Get-ChildItem -LiteralPath $inbox -Filter '*.json' | Sort-Object Name | ForEach-Object {
+    Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+})
+if ($events.Count -ne 2) { throw "relay wrote $($events.Count) events" }
+if ($events[0].prompt -ne 'hi' -or $events[0].conversation_id -ne 't') { throw 'relay changed the prompt event' }
+if ($events[0].host_window -and -not $events[0].host_process) { throw 'host window without its process name' }
+if ($events[1].PSObject.Properties.Name -contains 'host_window') { throw 'only the first event of a turn records the host window' }
+Remove-Item -LiteralPath (Join-Path $fakeHome 'cursor-done-notify') -Recurse -Force
 
 if (-not ('CursorDoneNotify.PathApi' -as [type])) {
     Add-Type -Namespace CursorDoneNotify -Name PathApi -MemberDefinition @'

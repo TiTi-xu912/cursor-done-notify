@@ -267,12 +267,14 @@ namespace CursorDoneBuddy
         const string UsageUrl = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
         const string PlanUrl = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo";
         static readonly TimeSpan MinGap = TimeSpan.FromSeconds(20);
+        static readonly TimeSpan UrgentGap = TimeSpan.FromSeconds(3);
         static readonly TimeSpan Interval = TimeSpan.FromMinutes(5);
         static readonly TimeSpan PlanInterval = TimeSpan.FromHours(6);
 
         readonly AutoResetEvent _wake = new AutoResetEvent(false);
         volatile QuotaSnapshot _latest;
         volatile bool _stopping;
+        volatile bool _urgent;
         int _version;
         Thread _worker;
         string _planJson;
@@ -315,6 +317,12 @@ namespace CursorDoneBuddy
 
         public void RequestRefresh()
         {
+            RequestRefresh(false);
+        }
+
+        public void RequestRefresh(bool urgent)
+        {
+            if (urgent) _urgent = true;
             _wake.Set();
         }
 
@@ -332,11 +340,13 @@ namespace CursorDoneBuddy
                 DateTime last = current == null ? DateTime.MinValue : current.FetchedAt;
                 TimeSpan since = DateTime.Now - last;
                 if (since < TimeSpan.Zero) since = TimeSpan.Zero;
-                if (since < MinGap)
+                TimeSpan gap = _urgent ? UrgentGap : MinGap;
+                if (since < gap)
                 {
-                    Thread.Sleep(MinGap - since);
+                    _wake.WaitOne(gap - since);
                     continue;
                 }
+                _urgent = false;
                 QuotaSnapshot next = FetchOnce();
                 if (_stopping) return;
                 if (!next.Ok && current != null && current.Ok)

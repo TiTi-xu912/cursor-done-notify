@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -18,7 +20,7 @@ internal static class HookRelay
             string body = ReadStdin();
             if (!string.IsNullOrEmpty(body))
             {
-                WriteInbox(CompactInbox(body));
+                WriteInbox(AddHostWindow(CompactInbox(body)));
                 EnsureHost();
             }
         }
@@ -144,6 +146,127 @@ internal static class HookRelay
         sb.Append('}');
         return sb.ToString();
     }
+
+    // The first event of a turn records which top-level window runs the agent (Cursor or a terminal),
+    // so the buddy can tell whether the user is looking at it and jump back to it.
+    private static string AddHostWindow(string body)
+    {
+        if (string.IsNullOrEmpty(body) || ExtractString(body, "hook_event_name") != "beforeSubmitPrompt")
+        {
+            return body;
+        }
+        int brace = body.IndexOf('{');
+        if (brace < 0)
+        {
+            return body;
+        }
+        string process;
+        IntPtr window = FindHostWindow(out process);
+        if (window == IntPtr.Zero)
+        {
+            return body;
+        }
+        string rest = body.Substring(brace + 1);
+        string fields = "\"host_window\":\"" + window.ToInt64().ToString(CultureInfo.InvariantCulture) +
+            "\",\"host_process\":\"" + EscapeJson(process) + "\"";
+        if (rest.TrimStart().Length > 0 && rest.TrimStart()[0] != '}')
+        {
+            fields += ",";
+        }
+        return body.Substring(0, brace + 1) + fields + rest;
+    }
+
+    private static IntPtr FindHostWindow(out string processName)
+    {
+        processName = "";
+        Dictionary<int, int> parents = new Dictionary<int, int>();
+        IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
+        if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1))
+        {
+            return IntPtr.Zero;
+        }
+        try
+        {
+            ProcessEntry entry = new ProcessEntry();
+            entry.dwSize = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+            if (Process32FirstW(snapshot, ref entry))
+            {
+                do
+                {
+                    parents[(int)entry.th32ProcessID] = (int)entry.th32ParentProcessID;
+                }
+                while (Process32NextW(snapshot, ref entry));
+            }
+        }
+        finally
+        {
+            CloseHandle(snapshot);
+        }
+
+        int pid = Process.GetCurrentProcess().Id;
+        for (int depth = 0; depth < 12; depth++)
+        {
+            int parent;
+            if (!parents.TryGetValue(pid, out parent) || parent <= 4 || parent == pid)
+            {
+                return IntPtr.Zero;
+            }
+            pid = parent;
+            try
+            {
+                using (Process process = Process.GetProcessById(pid))
+                {
+                    string name = process.ProcessName ?? "";
+                    if (name.Equals("explorer", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return IntPtr.Zero;
+                    }
+                    IntPtr window = process.MainWindowHandle;
+                    if (window != IntPtr.Zero)
+                    {
+                        processName = name;
+                        return window;
+                    }
+                }
+            }
+            catch (ArgumentException)
+            {
+                return IntPtr.Zero;
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+        return IntPtr.Zero;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProcessEntry
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool Process32FirstW(IntPtr snapshot, ref ProcessEntry entry);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool Process32NextW(IntPtr snapshot, ref ProcessEntry entry);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
 
     private static void AppendString(StringBuilder sb, ref bool first, string name, string value)
     {

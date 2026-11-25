@@ -77,12 +77,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnableRealtim
 
 - 拖动窗口可以搬家，松手后位置会记住。
 - 点角色会戳一下。进行中点窗口其他位置，可以展开或收起最近几步。
+- 点标题跳回这个对话：在终端里用 Cursor CLI 时切到那个终端窗口，在 Cursor 里时切到对应项目的窗口。
 - 这一轮结束、中断或出错后，点窗口就能关掉；也可以等它自己消失。
 - 右上角的关闭同样有效。
 - 好几个对话同时在跑时，窗口变成总览。点一行就盯住这一路，并尝试把对应工作区的 Cursor 窗口调到前面；再点一次回到总览。已经结束的那一行，点一下就从总览里去掉。
-- 右键点窗口，或者点任务栏托盘里的点点图标，会弹出菜单：静音、显示额度栏、主题（跟随系统、浅色、深色）、打开 Cursor 用量页、先关掉点点。这些选择保存在 `%APPDATA%\cursor-done-notify\settings.txt`，立即生效，不用重启 Cursor。
+- 右键点窗口，或者点任务栏托盘里的点点图标，会弹出菜单：静音、正看着对话时不打扰、显示额度栏、主题（跟随系统、浅色、深色）、打开 Cursor 用量页、先关掉点点。这些选择保存在 `%APPDATA%\cursor-done-notify\settings.txt`，立即生效，不用重启 Cursor。
 
-结束时的声音沿用 Windows 系统音：正常完成、中断、出错各一声。静音后不再响。
+结束时的声音沿用 Windows 系统音：正常完成、中断、出错各一声。静音后不再响。如果一轮结束时你正看着这个对话（前台就是跑它的终端或 Cursor 窗口），默认不响，气泡 4 秒后就收起。
 
 主题默认跟随 Windows 的“应用模式”，深色模式下气泡变深。
 
@@ -155,6 +156,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\hooks.ps1
 改完 `HookRelay.cs`、`BuddyForm.cs` 或 `Quota.cs` 后，再运行一次 `install.cmd`。编译产物 `hook-relay.exe` 和 `BuddyForm.dll` 不进版本库。
 
 要重新生成 README 里的截图，设置 `CURSOR_NOTIFY_PREVIEW=1` 再运行 `progress-host.ps1`，图片会写到 `%TEMP%\cursor-done-notify\preview`。
+
+角色的原始图在 `docs/art`：`character.jpg` 是定稿，`pose-<动作>.jpg` 是每个动作并排的 4 帧，背景是纯绿 `#00FF00`。换了其中某张以后，运行下面的命令重新抠图、切帧、按鞋底对齐，并重新生成 `sprites/poses` 里的 PNG 和 GIF。这一步只有开发时需要，要装 Python 3、Pillow 和 numpy：
+
+```powershell
+python tools\build-sprites.py --contact
+```
+
+加上 `--contact` 会多写一张 `sprites-contact.png`，方便检查抠图边缘和帧间抖动。
 
 ## 许可
 

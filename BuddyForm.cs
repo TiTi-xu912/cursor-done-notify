@@ -12,6 +12,103 @@ using Microsoft.Win32;
 
 namespace CursorDoneBuddy
 {
+    public static class DesktopWindows
+    {
+        public static string[] Foreground()
+        {
+            IntPtr hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero) return new string[] { "", "", "0" };
+            return new string[] { ProcessNameOf(hwnd), TitleOf(hwnd), hwnd.ToInt64().ToString(System.Globalization.CultureInfo.InvariantCulture) };
+        }
+
+        public static bool ActivateHandle(long handle)
+        {
+            IntPtr hwnd = new IntPtr(handle);
+            if (handle == 0 || !IsWindow(hwnd)) return false;
+            if (IsIconic(hwnd)) ShowWindow(hwnd, 9);
+            return SetForegroundWindow(hwnd);
+        }
+
+        public static bool Activate(string processName, string titlePart)
+        {
+            if (string.IsNullOrEmpty(titlePart)) return false;
+            IntPtr found = IntPtr.Zero;
+            EnumWindows(delegate(IntPtr hwnd, IntPtr unused)
+            {
+                if (!IsWindowVisible(hwnd)) return true;
+                string title = TitleOf(hwnd);
+                if (title.IndexOf(titlePart, StringComparison.OrdinalIgnoreCase) < 0) return true;
+                if (!string.Equals(ProcessNameOf(hwnd), processName, StringComparison.OrdinalIgnoreCase)) return true;
+                found = hwnd;
+                return false;
+            }, IntPtr.Zero);
+            if (found == IntPtr.Zero) return false;
+            if (IsIconic(found)) ShowWindow(found, 9);
+            return SetForegroundWindow(found);
+        }
+
+        static string TitleOf(IntPtr hwnd)
+        {
+            int length = GetWindowTextLength(hwnd);
+            if (length <= 0) return "";
+            System.Text.StringBuilder sb = new System.Text.StringBuilder(length + 1);
+            GetWindowText(hwnd, sb, sb.Capacity);
+            return sb.ToString();
+        }
+
+        static string ProcessNameOf(IntPtr hwnd)
+        {
+            uint pid;
+            GetWindowThreadProcessId(hwnd, out pid);
+            try
+            {
+                using (System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById((int)pid))
+                {
+                    return process.ProcessName;
+                }
+            }
+            catch (ArgumentException)
+            {
+                return "";
+            }
+            catch (InvalidOperationException)
+            {
+                return "";
+            }
+        }
+
+        delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        static extern bool SetForegroundWindow(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        static extern bool IsWindowVisible(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        static extern bool IsWindow(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        static extern bool IsIconic(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        static extern bool ShowWindow(IntPtr hwnd, int command);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        static extern int GetWindowTextLength(IntPtr hwnd);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        static extern int GetWindowText(IntPtr hwnd, System.Text.StringBuilder text, int maxCount);
+
+        [DllImport("user32.dll")]
+        static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    }
     public class BuddyForm : Form
     {
         const int WmNcHitTest = 0x84;
@@ -74,6 +171,7 @@ namespace CursorDoneBuddy
         int _quotaVersion = -1;
         bool _quotaExpanded;
         RectangleF _quotaRect;
+        RectangleF _headlineRect;
 
         Font _fontHeadline;
         Font _fontMeta;
@@ -118,6 +216,9 @@ namespace CursorDoneBuddy
         public string ActivatedSessionKey { get; private set; }
         public event EventHandler SessionActivated;
         public event EventHandler DismissRequested;
+        public event EventHandler FocusRequested;
+
+        public bool CanFocusSession { get; set; }
 
         public QuotaService Quota
         {
@@ -367,7 +468,7 @@ namespace CursorDoneBuddy
                     if (_shown) PresentFrame();
                 }
             }
-            Cursor = _closeRect.Contains(e.Location) || HitQuota(e.Location) || BoardKeyAt(e.Location) != null || HitCharacter(e.Location) ? Cursors.Hand : Cursors.SizeAll;
+            Cursor = _closeRect.Contains(e.Location) || HitQuota(e.Location) || HitHeadline(e.Location) || BoardKeyAt(e.Location) != null || HitCharacter(e.Location) ? Cursors.Hand : Cursors.SizeAll;
             base.OnMouseMove(e);
         }
 
@@ -405,6 +506,11 @@ namespace CursorDoneBuddy
                 else if (HitCharacter(e.Location))
                 {
                     Poke();
+                }
+                else if (HitHeadline(e.Location))
+                {
+                    EventHandler focus = FocusRequested;
+                    if (focus != null) focus(this, EventArgs.Empty);
                 }
                 else if (_phase == "done" || _phase == "settling")
                 {
@@ -553,6 +659,7 @@ namespace CursorDoneBuddy
             }
             _closeRect = Rectangle.Round(layout.Close);
             _quotaRect = layout.HasQuota ? layout.Quota : RectangleF.Empty;
+            _headlineRect = layout.Headline;
             return _canvas;
         }
 
@@ -764,6 +871,11 @@ namespace CursorDoneBuddy
             if (percent >= 90) return Color.FromArgb(255, 220, 64, 64);
             if (percent >= 70) return Color.FromArgb(255, 224, 138, 30);
             return Color.FromArgb(255, 47, 111, 235);
+        }
+
+        bool HitHeadline(Point point)
+        {
+            return CanFocusSession && !IsBoard(_history) && !_headlineRect.IsEmpty && _headlineRect.Contains(point);
         }
 
         bool HitQuota(Point point)
