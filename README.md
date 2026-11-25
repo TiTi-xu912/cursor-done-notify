@@ -47,7 +47,7 @@ A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent tu
 ## 需要什么
 
 - Windows 10 或更新版本
-- 系统自带的 Windows PowerShell 5.1 和 .NET Framework 4.x
+- 系统自带的 .NET Framework 4.x（安装脚本用到系统自带的 Windows PowerShell 5.1）
 - 桌面版 Cursor，并且能使用 Hooks
 
 不需要单独安装 Node.js、Python 或 .NET SDK。`install.cmd` 会用 Windows 自带的 `csc.exe` 编译两个小程序；读取额度用的是 Windows 自带的 `winsqlite3.dll`。
@@ -127,12 +127,12 @@ Cursor Agent
     ▼
 hook-relay.exe          立刻回复 {} / allow / continue
     │  截短后写入 %TEMP%\cursor-done-notify\inbox
+    │  每轮第一个事件顺带记下跑这个对话的窗口（终端或 Cursor）
     ▼
-progress-host.ps1       按对话分开记状态
-    │
-    ▼
-BuddyForm.dll           画点点
+buddy-host.exe          监听收件箱，按对话分开记状态，画点点，查额度
 ```
+
+`buddy-host.exe` 由 `Host.cs`（状态机）、`HostApp.cs`（窗口、托盘、自测、预览）、`BuddyForm.cs`（绘制）和 `Quota.cs`（额度）编译而成。它只在有对话时运行，所有对话都结束、窗口消失后就退出。
 
 安全模式注册：`beforeSubmitPrompt`、`postToolUse`、`postToolUseFailure`、`afterAgentThought`、`afterAgentResponse`、`subagentStop`、`stop`。实时模式另外注册 `preToolUse` 和 `subagentStart`。
 
@@ -140,22 +140,15 @@ BuddyForm.dll           画点点
 
 ## 开发
 
-在仓库目录里可以跑状态机自测，不需要弹出窗口：
-
-```powershell
-$env:CURSOR_NOTIFY_SELFTEST = '1'
-powershell -NoProfile -ExecutionPolicy Bypass -File .\progress-host.ps1
-```
-
-通过时输出 `SELFTEST OK`。`tests/hooks.ps1` 会先跑这段自测和 `tests/quota.ps1`（额度解析与缓存，不联网），再用一个临时用户目录检查安装和卸载：别人的 hook 还在，点点的条目会被去掉。它不会改你自己的 `%USERPROFILE%\.cursor\hooks.json`。
+`tests/hooks.ps1` 会先通过 `tests/host.ps1` 把宿主编译到临时目录，跑状态机自测（`buddy-host.exe --selftest`）和额度解析检查（不联网），再检查中继写出的事件，最后用一个临时用户目录检查安装和卸载：别人的 hook 还在，点点的条目会被去掉。它不会改你自己的 `%USERPROFILE%\.cursor\hooks.json`。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\hooks.ps1
 ```
 
-改完 `HookRelay.cs`、`BuddyForm.cs` 或 `Quota.cs` 后，再运行一次 `install.cmd`。编译产物 `hook-relay.exe` 和 `BuddyForm.dll` 不进版本库。
+改完任何 `.cs` 文件后，再运行一次 `install.cmd`。编译产物 `hook-relay.exe` 和 `buddy-host.exe` 不进版本库。
 
-要重新生成 README 里的截图，设置 `CURSOR_NOTIFY_PREVIEW=1` 再运行 `progress-host.ps1`，图片会写到 `%TEMP%\cursor-done-notify\preview`。
+要重新生成 README 里的截图，运行 `buddy-host.exe --preview <目录>`，不给目录时写到 `%TEMP%\cursor-done-notify\preview`。
 
 角色的原始图在 `docs/art`：`character.jpg` 是定稿，`pose-<动作>.jpg` 是每个动作并排的 4 帧，背景是纯绿 `#00FF00`。换了其中某张以后，运行下面的命令重新抠图、切帧、按鞋底对齐，并重新生成 `sprites/poses` 里的 PNG 和 GIF。这一步只有开发时需要，要装 Python 3、Pillow 和 numpy：
 

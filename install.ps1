@@ -25,12 +25,13 @@ function Stop-BuddyHost {
     if ($env:CURSOR_NOTIFY_SKIP_STOP -eq '1') {
         return
     }
-    $hostPattern = (@($PSScriptRoot, $installRoot) | Select-Object -Unique | ForEach-Object {
-        [regex]::Escape((Join-Path $_ 'progress-host.ps1'))
-    }) -join '|'
+    $roots = @($PSScriptRoot, $installRoot) | Select-Object -Unique
+    $legacyPattern = ($roots | ForEach-Object { [regex]::Escape((Join-Path $_ 'progress-host.ps1')) }) -join '|'
+    $hostPaths = @($roots | ForEach-Object { Join-Path $_ 'buddy-host.exe' })
     $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        ($_.Name -eq 'powershell.exe' -or $_.Name -eq 'pwsh.exe') -and
-        $_.CommandLine -match $hostPattern
+        ($_.Name -eq 'buddy-host.exe' -and $_.ExecutablePath -and
+            @($hostPaths | Where-Object { [string]::Equals($_, (Get-LongPath $_.ExecutablePath), [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) -or
+        (($_.Name -eq 'powershell.exe' -or $_.Name -eq 'pwsh.exe') -and $_.CommandLine -match $legacyPattern)
     })
     foreach ($proc in $procs) {
         Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
@@ -55,21 +56,22 @@ function Build-Buddy {
     $root = $PSScriptRoot
     $relayOut = Join-Path $root 'hook-relay.exe'
     $relaySrc = Join-Path $root 'HookRelay.cs'
-    $formOut = Join-Path $root 'BuddyForm.dll'
-    $formSrc = @((Join-Path $root 'BuddyForm.cs'), (Join-Path $root 'Quota.cs'))
+    $hostOut = Join-Path $root 'buddy-host.exe'
+    $hostSrc = @('BuddyForm.cs', 'Quota.cs', 'Host.cs', 'HostApp.cs') | ForEach-Object { Join-Path $root $_ }
     $buildDir = Join-Path $env:TEMP ('cursor-done-notify-build-' + [guid]::NewGuid().ToString('n'))
     $relayTemp = Join-Path $buildDir 'hook-relay.exe'
-    $formTemp = Join-Path $buildDir 'BuddyForm.dll'
+    $hostTemp = Join-Path $buildDir 'buddy-host.exe'
     New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
     try {
         & $csc /nologo /warn:4 /codepage:65001 /target:exe "/out:$relayTemp" $relaySrc
         if ($LASTEXITCODE -ne 0) { throw 'hook-relay.exe 编译失败' }
-        & $csc /nologo /warn:4 /codepage:65001 /target:library "/out:$formTemp" /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll $formSrc
-        if ($LASTEXITCODE -ne 0) { throw 'BuddyForm.dll 编译失败' }
+        & $csc /nologo /warn:4 /codepage:65001 /target:winexe "/out:$hostTemp" /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll $hostSrc
+        if ($LASTEXITCODE -ne 0) { throw 'buddy-host.exe 编译失败' }
 
         Stop-BuddyHost
         [System.IO.File]::Copy($relayTemp, $relayOut, $true)
-        [System.IO.File]::Copy($formTemp, $formOut, $true)
+        [System.IO.File]::Copy($hostTemp, $hostOut, $true)
+        Remove-Item -LiteralPath (Join-Path $root 'BuddyForm.dll') -Force -ErrorAction SilentlyContinue
     } finally {
         Remove-Item -LiteralPath $buildDir -Recurse -Force -ErrorAction SilentlyContinue
     }

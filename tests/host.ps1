@@ -1,20 +1,27 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$out = Join-Path $env:TEMP ('cursor-done-notify-quotatest-' + [guid]::NewGuid().ToString('n'))
+$out = Join-Path $env:TEMP ('cursor-done-notify-hosttest-' + [guid]::NewGuid().ToString('n'))
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $csc)) {
     $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
 }
-$dll = Join-Path $out 'BuddyForm.dll'
-& $csc /nologo /warn:4 /codepage:65001 /target:library "/out:$dll" /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll (Join-Path $root 'BuddyForm.cs') (Join-Path $root 'Quota.cs')
-if ($LASTEXITCODE -ne 0) { throw 'quota test compile failed' }
+$dll = Join-Path $out 'buddy-host.exe'
+$sources = @('BuddyForm.cs', 'Quota.cs', 'Host.cs', 'HostApp.cs') | ForEach-Object { Join-Path $root $_ }
+& $csc /nologo /warn:4 /codepage:65001 /target:winexe "/out:$dll" /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll $sources
+if ($LASTEXITCODE -ne 0) { throw 'host test compile failed' }
+
+$selftestOut = Join-Path $out 'selftest.txt'
+$run = Start-Process -FilePath $dll -ArgumentList '--selftest' -Wait -PassThru -NoNewWindow -RedirectStandardOutput $selftestOut
+$selftest = [System.IO.File]::ReadAllText($selftestOut).Trim()
+Write-Output $selftest
+if ($run.ExitCode -ne 0 -or $selftest -ne 'SELFTEST OK') { throw 'host selftest failed' }
 
 $check = @'
 param([string]$Dll)
 $ErrorActionPreference = 'Stop'
-Add-Type -Path $Dll
+[void][System.Reflection.Assembly]::LoadFrom($Dll)
 $now = Get-Date
 $usage = '{"billingCycleStart":"1793770164000","billingCycleEnd":"1796362164000","planUsage":{"totalSpend":18888,"includedSpend":7000,"bonusSpend":11888,"limit":7000,"autoPercentUsed":13.06,"apiPercentUsed":29.2,"totalPercentUsed":14.4},"spendLimitUsage":{"limitType":"user","individualLimit":2000,"individualUsed":550}}'
 $plan = '{"planInfo":{"planName":"Pro+","price":"$60/mo"}}'

@@ -395,18 +395,14 @@ internal static class HookRelay
                 }
 
                 string root = AppDomain.CurrentDomain.BaseDirectory;
-                string script = Path.Combine(root, "progress-host.ps1");
-                string powershell = Path.Combine(
-                    Environment.SystemDirectory,
-                    @"WindowsPowerShell\v1.0\powershell.exe");
-                if (!File.Exists(powershell))
+                string host = Path.Combine(root, "buddy-host.exe");
+                if (!File.Exists(host))
                 {
-                    powershell = "powershell.exe";
+                    return;
                 }
 
                 ProcessStartInfo start = new ProcessStartInfo();
-                start.FileName = powershell;
-                start.Arguments = "-NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + script + "\"";
+                start.FileName = host;
                 start.WorkingDirectory = root;
                 start.UseShellExecute = false;
                 start.CreateNoWindow = true;
@@ -453,7 +449,7 @@ internal static class HookRelay
             string name = process.ProcessName ?? string.Empty;
             long actualStart = process.StartTime.ToUniversalTime().Ticks;
             return !process.HasExited
-                && name.IndexOf("powershell", StringComparison.OrdinalIgnoreCase) >= 0
+                && name.Equals("buddy-host", StringComparison.OrdinalIgnoreCase)
                 && actualStart == expectedStart;
         }
         catch

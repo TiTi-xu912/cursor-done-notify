@@ -1,5 +1,6 @@
-# install.ps1 compiles these from HookRelay.cs and BuddyForm.cs
+# install.ps1 compiles these from the .cs files
 hook-relay.exe
+buddy-host.exe
 BuddyForm.dll
 sprites-contact.png
 sprites-contact.png

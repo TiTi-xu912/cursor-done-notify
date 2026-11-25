@@ -30,5 +30,5 @@ jobs:
           }
           & $csc /nologo /warn:4 /warnaserror /codepage:65001 /target:exe "/out:$out\hook-relay.exe" .\HookRelay.cs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $csc /nologo /warn:4 /warnaserror /codepage:65001 /target:library "/out:$out\BuddyForm.dll" /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll .\BuddyForm.cs .\Quota.cs
+          & $csc /nologo /warn:4 /warnaserror /codepage:65001 /target:winexe "/out:$out\buddy-host.exe" /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll .\BuddyForm.cs .\Quota.cs .\Host.cs .\HostApp.cs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
