@@ -56,7 +56,7 @@ A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent tu
 
 ## 安装
 
-1. 把这个仓库克隆或下载到一个你打算一直留着的目录。Hook 会按这个路径启动点点，之后不要把文件夹挪走。
+1. 从 [Releases](https://github.com/TiTi-xu912/cursor-done-notify/releases) 下载最新的 zip 解压，或者克隆这个仓库，放到一个你打算一直留着的目录。Hook 会按这个路径启动点点，之后不要把文件夹挪走。
 2. 双击 `install.cmd`。
 3. 完全退出 Cursor，再重新打开。
 4. 开始一轮 Agent 对话。点点会出现在鼠标所在屏幕的右下角。
@@ -117,6 +117,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnableRealtim
 [Environment]::SetEnvironmentVariable('CURSOR_NOTIFY_QUOTA', '0', 'User')
 ```
 
+## 更新
+
+点点每天最多向 GitHub 查一次有没有新的 Release（`api.github.com`，只带版本号，不带任何对话内容）。有新版本时，托盘会弹一次提示，右键菜单最上面会出现“发现新版本”，点它打开下载页。不想检查，在右键菜单里取消“自动检查更新”，或者设置 `CURSOR_NOTIFY_UPDATES=0`。
+
+更新方法：
+
+- 用 zip 安装的：先在右键菜单里选“先关掉点点”，再把新 zip 解压覆盖到原来的目录，双击 `install.cmd`。
+- 用 git 的：`git pull` 之后双击 `install.cmd`，它会重新编译。
+
 ## 卸载
 
 双击 `uninstall.cmd`。它会关掉点点，只从 `hooks.json` 里删掉当前安装目录对应的条目，并清理临时事件、摘要和错误日志；窗口位置和右键菜单里的设置会保留。然后完全退出 Cursor 再打开。
@@ -138,7 +147,7 @@ buddy-host.exe          监听收件箱，按对话分开记状态，画点点�
 
 安全模式注册：`beforeSubmitPrompt`、`postToolUse`、`postToolUseFailure`、`afterAgentThought`、`afterAgentResponse`、`subagentStop`、`stop`。实时模式另外注册 `preToolUse` 和 `subagentStart`。
 
-事件只留在本机临时目录里。过长的提示、命令和回答会截短后再交给窗口，超过一天的残留事件会在下次启动时清理。点点不会把这些内容发出去；唯一的网络请求是上面说的额度查询。
+事件只留在本机临时目录里。过长的提示、命令和回答会截短后再交给窗口，超过一天的残留事件会在下次启动时清理。点点不会把这些内容发出去；网络请求只有上面说的额度查询和每天一次的更新检查。
 
 ## 开发
 
@@ -148,7 +157,9 @@ buddy-host.exe          监听收件箱，按对话分开记状态，画点点�
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\hooks.ps1
 ```
 
-改完任何 `.cs` 文件后，再运行一次 `install.cmd`。编译产物 `hook-relay.exe` 和 `buddy-host.exe` 不进版本库。
+改完任何 `.cs` 文件后，再运行一次 `install.cmd`。
+
+发布新版本：先把 `Host.cs` 里的 `AppInfo.Version` 改成新版本号并提交，再推送同名 tag（比如 `v1.2.0`）。`.github/workflows/release.yml` 会跑测试，用 `tools/package.ps1` 编译并打包，然后创建 Release。tag 和代码里的版本号对不上时打包会失败。本地也可以直接运行 `tools\package.ps1`，zip 写在 `dist` 目录。编译产物 `hook-relay.exe` 和 `buddy-host.exe` 不进版本库。
 
 要重新生成 README 里的截图，运行 `buddy-host.exe --preview <目录>`，不给目录时写到 `%TEMP%\cursor-done-notify\preview`。
 

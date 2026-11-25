@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run tests
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\hooks.ps1
+
+      - name: Package
+        shell: powershell
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\package.ps1 -Version $env:TAG
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publish
+        shell: powershell
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = Get-ChildItem -LiteralPath dist -Filter '*.zip' | Select-Object -First 1
+          gh release create $env:TAG $zip.FullName --title $env:TAG --generate-notes

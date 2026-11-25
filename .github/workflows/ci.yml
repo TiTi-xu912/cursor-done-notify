@@ -19,16 +19,8 @@ jobs:
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\hooks.ps1
 
-      - name: Compile with warnings enabled
+      - name: Build the release package with warnings as errors
         shell: powershell
         run: |
-          $out = Join-Path $env:RUNNER_TEMP 'cursor-done-notify-build'
-          New-Item -ItemType Directory -Force -Path $out | Out-Null
-          $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-          if (-not (Test-Path -LiteralPath $csc)) {
-            $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
-          }
-          & $csc /nologo /warn:4 /warnaserror /codepage:65001 /target:exe "/out:$out\hook-relay.exe" .\HookRelay.cs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $csc /nologo /warn:4 /warnaserror /codepage:65001 /target:winexe "/out:$out\buddy-host.exe" /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll .\BuddyForm.cs .\Quota.cs .\Host.cs .\HostApp.cs
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\package.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

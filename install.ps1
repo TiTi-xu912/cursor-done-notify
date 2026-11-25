@@ -327,7 +327,11 @@ if ($Uninstall) {
 }
 
 if ($env:CURSOR_NOTIFY_SKIP_BUILD -ne '1') {
-    Build-Buddy
+    if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'HookRelay.cs')) {
+        Build-Buddy
+    } elseif (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'buddy-host.exe'))) {
+        throw "Missing buddy host: $(Join-Path $PSScriptRoot 'buddy-host.exe')"
+    }
 }
 
 if (-not (Test-Path -LiteralPath $relayExe)) {

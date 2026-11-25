@@ -3,7 +3,7 @@ hook-relay.exe
 buddy-host.exe
 BuddyForm.dll
 sprites-contact.png
-sprites-contact.png
+dist/
 
 .vs/
 *.user

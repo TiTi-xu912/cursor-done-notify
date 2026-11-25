@@ -9,6 +9,12 @@ using System.Web.Script.Serialization;
 
 namespace CursorDoneBuddy
 {
+    public static class AppInfo
+    {
+        public const string Version = "1.1.0";
+        public const string Repository = "TiTi-xu912/cursor-done-notify";
+    }
+
     public static class L
     {
         public static bool English;
@@ -205,6 +211,7 @@ namespace CursorDoneBuddy
         public bool Quiet = true;
         public string Theme = "auto";
         public string Language = "auto";
+        public bool Updates = true;
         public int Seconds;
         public int StaleMinutes;
 
@@ -233,6 +240,7 @@ namespace CursorDoneBuddy
                         case "mute": settings.Mute = value == "1"; break;
                         case "quota": settings.Quota = value != "0"; break;
                         case "quiet": settings.Quiet = value != "0"; break;
+                        case "updates": settings.Updates = value != "0"; break;
                         case "theme": if (value == "light" || value == "dark") settings.Theme = value; break;
                         case "language": if (value == "zh" || value == "en") settings.Language = value; break;
                         case "seconds": int.TryParse(value, out settings.Seconds); break;
@@ -251,7 +259,7 @@ namespace CursorDoneBuddy
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
                 string text = "mute=" + (Mute ? "1" : "0") + "\nquota=" + (Quota ? "1" : "0") + "\nquiet=" + (Quiet ? "1" : "0") +
-                    "\ntheme=" + Theme + "\nlanguage=" + Language +
+                    "\nupdates=" + (Updates ? "1" : "0") + "\ntheme=" + Theme + "\nlanguage=" + Language +
                     "\nseconds=" + Seconds.ToString(CultureInfo.InvariantCulture) + "\nstale=" + StaleMinutes.ToString(CultureInfo.InvariantCulture) + "\n";
                 File.WriteAllText(path, text, new UTF8Encoding(false));
             }

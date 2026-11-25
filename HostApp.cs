@@ -9,7 +9,9 @@ using System.Globalization;
 using System.IO;
 using System.Media;
 using System.Text;
+using System.Net;
 using System.Threading;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 namespace CursorDoneBuddy
@@ -194,6 +196,7 @@ namespace CursorDoneBuddy
 
             Update();
             Place();
+            CheckForUpdate();
             Application.Run(_buddy);
             _timer.Dispose();
             _watcher.Dispose();
@@ -352,6 +355,9 @@ namespace CursorDoneBuddy
         ToolStripMenuItem _secondsItem;
         ToolStripMenuItem _staleItem;
         ToolStripMenuItem _languageItem;
+        ToolStripMenuItem _updatesItem;
+        ToolStripMenuItem _newVersionItem;
+        UpdateInfo _update;
 
         static ToolStripMenuItem Choice(ToolStripMenuItem parent, string text, object tag, EventHandler click)
         {
@@ -426,16 +432,15 @@ namespace CursorDoneBuddy
                 });
             }
             ToolStripMenuItem usage = new ToolStripMenuItem(L.T("打开 Cursor 用量页", "Open Cursor usage page"));
-            usage.Click += delegate
-            {
-                try
-                {
-                    Process.Start("https://cursor.com/dashboard?tab=usage");
-                }
-                catch (Win32Exception) { }
-            };
+            usage.Click += delegate { OpenUrl("https://cursor.com/dashboard?tab=usage"); };
+            _updatesItem = new ToolStripMenuItem(L.T("自动检查更新", "Check for updates"));
+            _updatesItem.Click += delegate { _state.Settings.Updates = !_state.Settings.Updates; SaveAndApply(); };
+            _newVersionItem = new ToolStripMenuItem();
+            _newVersionItem.Font = new Font(_newVersionItem.Font, FontStyle.Bold);
+            _newVersionItem.Click += delegate { OpenUrl(_update == null ? "" : _update.Url); };
             ToolStripMenuItem close = new ToolStripMenuItem(L.T("先关掉点点", "Close for now"));
             close.Click += delegate { _buddy.Close(); };
+            menu.Items.Add(_newVersionItem);
             menu.Items.Add(_muteItem);
             menu.Items.Add(_quietItem);
             menu.Items.Add(_quotaItem);
@@ -443,6 +448,7 @@ namespace CursorDoneBuddy
             menu.Items.Add(_secondsItem);
             menu.Items.Add(_staleItem);
             menu.Items.Add(_languageItem);
+            menu.Items.Add(_updatesItem);
             menu.Items.Add(usage);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(close);
@@ -450,6 +456,52 @@ namespace CursorDoneBuddy
             _tray.Text = L.T("点点", "Diandian");
             _tray.ContextMenuStrip = menu;
             if (old != null) old.Dispose();
+        }
+
+        static void OpenUrl(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return;
+            try
+            {
+                Process.Start(url);
+            }
+            catch (Win32Exception) { }
+        }
+
+        void CheckForUpdate()
+        {
+            if (!_state.Settings.Updates || Environment.GetEnvironmentVariable("CURSOR_NOTIFY_UPDATES") == "0") return;
+            string cache = Path.Combine(_stateDir, "update-check.txt");
+            UpdateInfo cached = UpdateInfo.Load(cache);
+            if (cached != null && (DateTime.UtcNow - cached.CheckedUtc).TotalHours < 24)
+            {
+                ShowUpdate(cached, cache);
+                return;
+            }
+            Thread worker = new Thread(delegate()
+            {
+                UpdateInfo fresh = UpdateInfo.Fetch(cached);
+                if (fresh == null) return;
+                fresh.Save(cache);
+                try
+                {
+                    if (!_buddy.IsDisposed) _buddy.BeginInvoke(new MethodInvoker(delegate { ShowUpdate(fresh, cache); }));
+                }
+                catch (InvalidOperationException) { }
+            });
+            worker.IsBackground = true;
+            worker.Start();
+        }
+
+        void ShowUpdate(UpdateInfo info, string cache)
+        {
+            _update = info;
+            ApplySettings();
+            if (!info.Newer || info.NotifiedTag == info.Tag) return;
+            info.NotifiedTag = info.Tag;
+            info.Save(cache);
+            _tray.ShowBalloonTip(6000, L.T("点点有新版本", "Diandian update"),
+                L.T(info.Tag + " 已发布，右键点点点或托盘图标即可下载。", info.Tag + " is out. Right-click the buddy or the tray icon to download."), ToolTipIcon.Info);
         }
 
         void SaveAndApply()
@@ -483,6 +535,10 @@ namespace CursorDoneBuddy
             {
                 item.Checked = (string)item.Tag == settings.Language;
             }
+            _updatesItem.Checked = settings.Updates;
+            bool newer = settings.Updates && _update != null && _update.Newer;
+            _newVersionItem.Visible = newer;
+            if (newer) _newVersionItem.Text = L.T("发现新版本 " + _update.Tag + "，点这里下载", "New version " + _update.Tag + " - click to download");
             _lastSignature = "";
         }
 
@@ -539,6 +595,126 @@ namespace CursorDoneBuddy
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    sealed class UpdateInfo
+    {
+        public string Tag = "";
+        public string Url = "";
+        public string NotifiedTag = "";
+        public DateTime CheckedUtc = DateTime.MinValue;
+
+        public bool Newer
+        {
+            get { return IsNewer(Tag, AppInfo.Version); }
+        }
+
+        public static bool IsNewer(string tag, string current)
+        {
+            Version latest;
+            Version mine;
+            return TryParse(tag, out latest) && TryParse(current, out mine) && latest > mine;
+        }
+
+        static bool TryParse(string text, out Version version)
+        {
+            version = null;
+            if (string.IsNullOrEmpty(text)) return false;
+            string clean = text.Trim().TrimStart('v', 'V');
+            int dash = clean.IndexOf('-');
+            if (dash >= 0) clean = clean.Substring(0, dash);
+            if (clean.IndexOf('.') < 0) clean += ".0";
+            return Version.TryParse(clean, out version);
+        }
+
+        public static UpdateInfo Load(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return null;
+                string[] parts = File.ReadAllText(path, Encoding.UTF8).Trim().Split('|');
+                long ticks;
+                if (parts.Length < 4 || !long.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out ticks)) return null;
+                UpdateInfo info = new UpdateInfo();
+                info.CheckedUtc = new DateTime(ticks, DateTimeKind.Utc);
+                info.Tag = parts[1];
+                info.Url = parts[2];
+                info.NotifiedTag = parts[3];
+                return info;
+            }
+            catch (IOException) { return null; }
+            catch (UnauthorizedAccessException) { return null; }
+            catch (ArgumentException) { return null; }
+        }
+
+        public void Save(string path)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(path, CheckedUtc.Ticks.ToString(CultureInfo.InvariantCulture) + "|" + Tag + "|" + Url + "|" + NotifiedTag, new UTF8Encoding(false));
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        public static UpdateInfo Fetch(UpdateInfo previous)
+        {
+            try
+            {
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create("https://api.github.com/repos/" + AppInfo.Repository + "/releases/latest");
+                request.UserAgent = "cursor-done-notify/" + AppInfo.Version;
+                request.Accept = "application/vnd.github+json";
+                request.Timeout = 8000;
+                request.ReadWriteTimeout = 8000;
+                string body;
+                using (WebResponse response = request.GetResponse())
+                using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+                {
+                    body = reader.ReadToEnd();
+                }
+                return Parse(body, previous);
+            }
+            catch (WebException)
+            {
+                return Checked(previous);
+            }
+            catch (IOException)
+            {
+                return Checked(previous);
+            }
+        }
+
+        static UpdateInfo Checked(UpdateInfo previous)
+        {
+            UpdateInfo info = previous ?? new UpdateInfo();
+            info.CheckedUtc = DateTime.UtcNow;
+            return info;
+        }
+
+        public static UpdateInfo Parse(string json, UpdateInfo previous)
+        {
+            System.Collections.IDictionary map = null;
+            try
+            {
+                map = new JavaScriptSerializer().DeserializeObject(json ?? "") as System.Collections.IDictionary;
+            }
+            catch (ArgumentException) { }
+            catch (InvalidOperationException) { }
+            UpdateInfo info = new UpdateInfo();
+            info.CheckedUtc = DateTime.UtcNow;
+            info.NotifiedTag = previous == null ? "" : previous.NotifiedTag;
+            if (map != null)
+            {
+                info.Tag = Convert.ToString(map["tag_name"], CultureInfo.InvariantCulture) ?? "";
+                info.Url = Convert.ToString(map["html_url"], CultureInfo.InvariantCulture) ?? "";
+            }
+            if (!info.Url.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase)) info.Url = "https://github.com/" + AppInfo.Repository + "/releases/latest";
+            info.Tag = info.Tag.Replace("|", "");
+            info.Url = info.Url.Replace("|", "");
+            return info;
         }
     }
 
@@ -672,6 +848,7 @@ namespace CursorDoneBuddy
                 Parsing();
                 English();
                 SettingsFile();
+                Updates();
             }
             finally
             {
@@ -950,6 +1127,31 @@ namespace CursorDoneBuddy
             L.English = false;
         }
 
+        static void Updates()
+        {
+            Check(UpdateInfo.IsNewer("v1.2.0", "1.1.0"), "1.2.0 is newer");
+            Check(UpdateInfo.IsNewer("v1.10", "1.9.3"), "1.10 is newer than 1.9.3");
+            Check(!UpdateInfo.IsNewer("v1.1.0", "1.1.0"), "same version is not newer");
+            Check(!UpdateInfo.IsNewer("v1.0.9-beta", "1.1.0"), "older pre-release is not newer");
+            Check(!UpdateInfo.IsNewer("nightly", "1.1.0"), "unparseable tags are ignored");
+            UpdateInfo parsed = UpdateInfo.Parse("{\"tag_name\":\"v9.0.0\",\"html_url\":\"https://github.com/x/y/releases/tag/v9.0.0\"}", null);
+            Check(parsed.Tag == "v9.0.0" && parsed.Newer && parsed.Url.EndsWith("/v9.0.0"), "release json");
+            UpdateInfo hostile = UpdateInfo.Parse("{\"tag_name\":\"v9.0.0\",\"html_url\":\"file:///C:/evil.exe\"}", null);
+            Check(hostile.Url.StartsWith("https://github.com/" + AppInfo.Repository), "only GitHub release pages are opened");
+            string path = Path.Combine(Path.GetTempPath(), "cursor-done-notify-update-" + Guid.NewGuid().ToString("n") + ".txt");
+            try
+            {
+                parsed.NotifiedTag = "v9.0.0";
+                parsed.Save(path);
+                UpdateInfo loaded = UpdateInfo.Load(path);
+                Check(loaded != null && loaded.Tag == "v9.0.0" && loaded.NotifiedTag == "v9.0.0" && Math.Abs((loaded.CheckedUtc - parsed.CheckedUtc).TotalSeconds) < 1, "update cache round trip");
+            }
+            finally
+            {
+                File.Delete(path);
+            }
+        }
+
         static void SettingsFile()
         {
             string path = Path.Combine(Path.GetTempPath(), "cursor-done-notify-settings-" + Guid.NewGuid().ToString("n") + ".txt");
@@ -961,10 +1163,11 @@ namespace CursorDoneBuddy
                 saved.Theme = "dark";
                 saved.Language = "en";
                 saved.Seconds = 20;
+                saved.Updates = false;
                 saved.StaleMinutes = 60;
                 saved.Save(path);
                 BuddySettings loaded = BuddySettings.Load(path);
-                Check(loaded.Mute && !loaded.Quiet && loaded.Quota && loaded.Theme == "dark" && loaded.Language == "en" && loaded.Seconds == 20 && loaded.StaleMinutes == 60, "settings round trip");
+                Check(loaded.Mute && !loaded.Quiet && loaded.Quota && loaded.Theme == "dark" && loaded.Language == "en" && loaded.Seconds == 20 && loaded.StaleMinutes == 60 && !loaded.Updates, "settings round trip");
                 BuddyState st = Fresh();
                 st.ApplyTiming(loaded);
                 Check(st.DoneSeconds == 20 && st.StaleMinutes == 60, "menu timing wins");
