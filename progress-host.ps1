@@ -20,6 +20,155 @@ function Get-StateDir {
     return (Join-Path $env:TEMP 'cursor-done-notify')
 }
 
+function Get-SettingsPath {
+    return (Join-Path $env:APPDATA 'cursor-done-notify\settings.txt')
+}
+
+function Read-Settings {
+    $settings = @{ Mute = $false; Quota = $true; Theme = 'auto' }
+    $path = Get-SettingsPath
+    if (Test-Path -LiteralPath $path) {
+        try {
+            foreach ($line in ((Read-Utf8File $path) -split "`n")) {
+                $pair = $line.Trim() -split '=', 2
+                if ($pair.Count -ne 2) { continue }
+                switch ($pair[0].Trim()) {
+                    'mute' { $settings.Mute = $pair[1].Trim() -eq '1' }
+                    'quota' { $settings.Quota = $pair[1].Trim() -ne '0' }
+                    'theme' {
+                        $theme = $pair[1].Trim()
+                        if ($theme -eq 'light' -or $theme -eq 'dark') { $settings.Theme = $theme }
+                    }
+                }
+            }
+        } catch {
+        }
+    }
+    return $settings
+}
+
+function Save-Settings($Settings) {
+    $mute = if ($Settings.Mute) { '1' } else { '0' }
+    $quota = if ($Settings.Quota) { '1' } else { '0' }
+    $text = "mute=$mute`nquota=$quota`ntheme=$($Settings.Theme)`n"
+    try {
+        Write-Utf8File (Get-SettingsPath) $text
+    } catch {
+    }
+}
+
+function Format-Money([long]$Cents) {
+    return '$' + ([double]$Cents / 100).ToString('0.00', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+# Spend is sampled from the quota snapshot: the first fetch after a turn starts, and the latest fetch after it ends.
+function Update-TurnSpend($Snapshot) {
+    if (-not $Snapshot -or -not $Snapshot.Ok -or $Snapshot.TotalSpendCents -lt 0) {
+        return
+    }
+    $spend = [long]$Snapshot.TotalSpendCents
+    $fetched = $Snapshot.FetchedAt
+    Save-CurrentSession
+    foreach ($key in @($script:SessionOrder)) {
+        $bag = $script:Sessions[$key]
+        if (-not $bag -or -not $bag.StartedAt) { continue }
+        $changed = $false
+        if ($bag.SpendStart -lt 0 -and $bag.Phase -ne 'done' -and $fetched -ge $bag.StartedAt.AddSeconds(-30)) {
+            $bag.SpendStart = $spend
+            $changed = $true
+        }
+        if ($bag.Phase -eq 'done' -and $bag.DoneAt -and $bag.SpendStart -ge 0 -and $fetched -ge $bag.DoneAt -and $bag.SpendEnd -ne $spend) {
+            $bag.SpendEnd = $spend
+            $changed = $true
+        }
+        if ($changed) {
+            $script:Sessions[$key] = $bag
+            if ($script:SessionKey -eq $key) {
+                $script:SpendStart = $bag.SpendStart
+                $script:SpendEnd = $bag.SpendEnd
+            }
+        }
+    }
+}
+
+function Test-NeedsSpendSample {
+    foreach ($key in @($script:SessionOrder)) {
+        $bag = $script:Sessions[$key]
+        if (-not $bag) { continue }
+        if ($bag.Phase -ne 'done' -and $bag.StartedAt -and $bag.SpendStart -lt 0) { return $true }
+    }
+    return $false
+}
+
+function Get-SpendText {
+    if ($script:SpendStart -lt 0 -or $script:SpendEnd -lt 0) {
+        return ''
+    }
+    $delta = $script:SpendEnd - $script:SpendStart
+    if ($delta -le 0) {
+        return ''
+    }
+    if ($script:SpendShared) {
+        return '期间约 ' + (Format-Money $delta)
+    }
+    return '本轮约 ' + (Format-Money $delta)
+}
+
+function Update-QuotaAlert($Snapshot) {
+    if (-not $Snapshot -or -not $Snapshot.Ok) {
+        return
+    }
+    $total = [double]$Snapshot.HeadlinePercent
+    $api = [double]$Snapshot.ApiPercent
+    $name = '本期额度'
+    $percent = $total
+    if ($api -gt $total) {
+        $name = '本期 API 额度'
+        $percent = $api
+    }
+    $level = 0
+    if ($percent -ge 100) { $level = 100 }
+    elseif ($percent -ge 80) { $level = 80 }
+    if ($level -eq 0) {
+        return
+    }
+    $cycle = 'unknown'
+    if ($Snapshot.CycleEnd -ne [datetime]::MinValue) {
+        $cycle = $Snapshot.CycleEnd.ToUniversalTime().ToString('yyyyMMddHH')
+    }
+    $alerted = 0
+    if (Test-Path -LiteralPath $script:QuotaAlertPath) {
+        try {
+            $saved = (Read-Utf8File $script:QuotaAlertPath).Trim() -split '\|'
+            if ($saved.Count -eq 2 -and $saved[0] -eq $cycle) { $alerted = [int]$saved[1] }
+        } catch {
+        }
+    }
+    if ($level -le $alerted) {
+        return
+    }
+    try {
+        Write-Utf8File $script:QuotaAlertPath ($cycle + '|' + $level)
+    } catch {
+    }
+    if ($level -ge 100) {
+        $script:QuotaNotice = $name + '已用完'
+    } else {
+        $script:QuotaNotice = $name + '已用 ' + [int][Math]::Floor($percent) + '%'
+    }
+    $script:QuotaNoticeUntil = (Get-Date).AddSeconds(15)
+    if (-not $script:Settings.Mute) {
+        [System.Media.SystemSounds]::Exclamation.Play()
+    }
+}
+
+function Get-QuotaNotice {
+    if ($script:QuotaNotice -and $script:QuotaNoticeUntil -and (Get-Date) -lt $script:QuotaNoticeUntil) {
+        return $script:QuotaNotice
+    }
+    return ''
+}
+
 function Clear-StaleState {
     $dir = Get-StateDir
     $inbox = Join-Path $dir 'inbox'
@@ -142,12 +291,14 @@ function Get-ToolPhrase([string]$ToolName, [bool]$Finished) {
 }
 
 function Get-ToolPose([string]$ToolName) {
-    if ($ToolName -like 'MCP:*') { return 'search' }
+    if ($ToolName -like 'MCP:*') { return 'web' }
     switch -Regex ($ToolName) {
         '^(Read|TabRead)$' { return 'read' }
         '^(Write|StrReplace|Edit|EditNotebook|Delete)$' { return 'write' }
         '^Shell$' { return 'terminal' }
-        '^(Grep|Glob|SemanticSearch|WebSearch|WebFetch)$' { return 'search' }
+        '^(Grep|Glob|SemanticSearch)$' { return 'search' }
+        '^(WebSearch|WebFetch)$' { return 'web' }
+        '^Task$' { return 'delegate' }
         default { return 'think' }
     }
 }
@@ -155,10 +306,18 @@ function Get-ToolPose([string]$ToolName) {
 function Get-CurrentPose {
     if ($script:Phase -eq 'idle') { return 'idle' }
     if ($script:Phase -eq 'done' -or $script:Phase -eq 'settling') {
-        if ($script:Accent -eq 'red' -or $script:Accent -eq 'orange') { return 'error' }
+        if ($script:Accent -eq 'red') { return 'error' }
+        if ($script:Accent -eq 'orange') {
+            if ($script:Pose -eq 'sleep') { return 'sleep' }
+            return 'stop'
+        }
         return 'done'
     }
     if ($script:Accent -eq 'red') { return 'error' }
+    if ($script:Phase -eq 'running' -and -not (Test-WorkOutstanding) -and $script:StepStartedAt -and
+        ((Get-Date) - $script:StepStartedAt).TotalSeconds -ge $script:DozeSeconds) {
+        return 'sleep'
+    }
     if ([string]::IsNullOrWhiteSpace($script:Pose)) { return 'think' }
     return $script:Pose
 }
@@ -237,6 +396,10 @@ function Reset-Fields {
     $script:RetiredGenerations = New-Object System.Collections.Generic.List[string]
     $script:GenerationId = ''
     $script:WorkspaceRoot = ''
+    $script:SpendStart = -1
+    $script:SpendEnd = -1
+    $script:SpendShared = $false
+    $script:DoneAt = $null
     $script:UpdatedAt = Get-Date
 }
 
@@ -259,8 +422,14 @@ function Initialize-State {
         'Phase', 'Headline', 'Activity', 'Pose', 'Detail', 'Prompt', 'Project', 'Snippet', 'Accent',
         'StartedAt', 'StepStartedAt', 'Steps', 'History', 'DoneUntil', 'SettleUntil',
         'SoundPlayed', 'SoundPending', 'Summary', 'StopSeen', 'AnswerSeen', 'OpenTools', 'OpenSubagents',
-        'OpenToolIds', 'CompletedToolIds', 'RetiredGenerations', 'GenerationId', 'UpdatedAt', 'WorkspaceRoot'
+        'OpenToolIds', 'CompletedToolIds', 'RetiredGenerations', 'GenerationId', 'UpdatedAt', 'WorkspaceRoot',
+        'SpendStart', 'SpendEnd', 'SpendShared', 'DoneAt'
     )
+    $script:DozeSeconds = 90
+    $script:QuotaNotice = ''
+    $script:QuotaNoticeUntil = $null
+    $script:QuotaAlertPath = Join-Path (Get-StateDir) 'quota-alert.txt'
+    $script:Settings = Read-Settings
     $script:Sessions = @{}
     $script:SessionOrder = New-Object System.Collections.Generic.List[string]
     $script:SessionKey = ''
@@ -387,6 +556,22 @@ function Reset-Turn {
     $script:Activity = ''
     $script:Detail = ''
     $script:Pose = 'think'
+    $script:SpendStart = -1
+    $script:SpendEnd = -1
+    $script:SpendShared = Test-OtherSessionRunning
+    $script:DoneAt = $null
+}
+
+function Test-OtherSessionRunning {
+    if (-not $script:Sessions) {
+        return $false
+    }
+    foreach ($key in @($script:Sessions.Keys)) {
+        if ($key -eq $script:SessionKey) { continue }
+        $phase = $script:Sessions[$key].Phase
+        if ($phase -eq 'running' -or $phase -eq 'settling') { return $true }
+    }
+    return $false
 }
 
 function Test-WorkOutstanding {
@@ -402,6 +587,8 @@ function Enter-Running {
     $script:Phase = 'running'
     $script:SettleUntil = $null
     $script:DoneUntil = $null
+    $script:DoneAt = $null
+    $script:SpendEnd = -1
     $script:Headline = '正在处理'
     $script:Accent = 'blue'
 }
@@ -462,10 +649,16 @@ function Complete-Turn([string]$Status) {
             $script:Pose = 'done'
         }
     }
-    if ($Status -eq 'error' -or $Status -eq 'aborted') {
+    if ($Status -eq 'error') {
         $script:Pose = 'error'
+    } elseif ($Status -eq 'aborted') {
+        $script:Pose = 'stop'
     } else {
         $script:Pose = 'done'
+    }
+    $script:DoneAt = Get-Date
+    if (Test-OtherSessionRunning) {
+        $script:SpendShared = $true
     }
     $script:Summary = '共用 ' + (Format-Elapsed $script:StartedAt) + ' · ' + $script:Steps + ' 步'
     if ($script:Project) {
@@ -498,7 +691,7 @@ function Expire-StaleTurn {
     $script:Activity = '长时间没有收到 Cursor 事件'
     $script:Detail = ''
     $script:Accent = 'orange'
-    $script:Pose = 'error'
+    $script:Pose = 'sleep'
     $script:Summary = '最后活动于 ' + $script:UpdatedAt.ToString('HH:mm')
     $script:DoneUntil = (Get-Date).AddSeconds($script:DoneSeconds)
     $script:SoundPending = $false
@@ -516,6 +709,10 @@ function Soft-Complete {
     $script:Accent = 'green'
     $script:Pose = 'done'
     $script:Summary = '共用 ' + (Format-Elapsed $script:StartedAt) + ' · ' + $script:Steps + ' 步'
+    $script:DoneAt = Get-Date
+    if (Test-OtherSessionRunning) {
+        $script:SpendShared = $true
+    }
     if ($script:Project) {
         $script:Activity = $script:Project
     } elseif ([string]::IsNullOrWhiteSpace($script:Activity)) {
@@ -747,7 +944,7 @@ function Get-Presentation {
         else { $pose = 'think' }
     } elseif ($aborted -gt 0) {
         $accent = 'orange'
-        $pose = 'error'
+        $pose = 'stop'
     }
     $hint = '点一行只处理这一路'
     $activity = ''
@@ -864,12 +1061,14 @@ function Play-PendingSounds {
         }
     }
     if (-not $chosen) { return }
-    if ($chosen.Accent -eq 'red') {
-        [System.Media.SystemSounds]::Hand.Play()
-    } elseif ($chosen.Accent -eq 'orange') {
-        [System.Media.SystemSounds]::Exclamation.Play()
-    } else {
-        [System.Media.SystemSounds]::Asterisk.Play()
+    if (-not $script:Settings.Mute) {
+        if ($chosen.Accent -eq 'red') {
+            [System.Media.SystemSounds]::Hand.Play()
+        } elseif ($chosen.Accent -eq 'orange') {
+            [System.Media.SystemSounds]::Exclamation.Play()
+        } else {
+            [System.Media.SystemSounds]::Asterisk.Play()
+        }
     }
     foreach ($key in @($script:SessionOrder)) {
         $bag = $script:Sessions[$key]
@@ -1133,7 +1332,7 @@ function Apply-Event($Payload, [string]$Raw) {
             Enter-Running
             $script:Steps++
             $script:StepStartedAt = Get-Date
-            $script:Pose = 'think'
+            $script:Pose = 'delegate'
             $script:Activity = '正在处理子任务'
             $task = ''
             if ($Payload -and $Payload.task) {
@@ -1244,6 +1443,10 @@ function Write-LiveView {
 
 function Get-MetaText {
     if ($script:Phase -eq 'done') {
+        $spend = Get-SpendText
+        if ($spend) {
+            return ([string]$script:Summary + ' · ' + $spend)
+        }
         return [string]$script:Summary
     }
     if ($script:StartedAt) {
@@ -1411,6 +1614,59 @@ if ($env:CURSOR_NOTIFY_SELFTEST -eq '1') {
     Invoke-SessionClick 'chat-a'
     if ($script:PinnedKey) { throw 'second click should return to the overview' }
 
+    Initialize-State
+    $script:Settings.Mute = $true
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'poses'; generation_id = 'poses-g'; prompt = '动作' }) ''
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'postToolUse'; conversation_id = 'poses'; generation_id = 'poses-g'; tool_name = 'Task'; tool_use_id = 'p1' }) ''
+    if ((Get-CurrentPose) -ne 'delegate') { throw "Task pose: $(Get-CurrentPose)" }
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'postToolUse'; conversation_id = 'poses'; generation_id = 'poses-g'; tool_name = 'WebFetch'; tool_use_id = 'p2' }) ''
+    if ((Get-CurrentPose) -ne 'web') { throw "WebFetch pose: $(Get-CurrentPose)" }
+    $script:StepStartedAt = (Get-Date).AddSeconds(-($script:DozeSeconds + 5))
+    if ((Get-CurrentPose) -ne 'sleep') { throw "quiet turn should doze: $(Get-CurrentPose)" }
+    $script:OpenTools = 1
+    if ((Get-CurrentPose) -eq 'sleep') { throw 'open tool must not doze' }
+    $script:OpenTools = 0
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'stop'; conversation_id = 'poses'; generation_id = 'poses-g'; status = 'aborted' }) ''
+    if ((Get-CurrentPose) -ne 'stop') { throw "aborted pose: $(Get-CurrentPose)" }
+
+    Initialize-State
+    $script:Settings.Mute = $true
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'spend'; generation_id = 'spend-g'; prompt = '花费' }) ''
+    Update-TurnSpend ([pscustomobject]@{ Ok = $true; TotalSpendCents = 1000; FetchedAt = (Get-Date) })
+    if ($script:SpendStart -ne 1000) { throw "spend baseline: $($script:SpendStart)" }
+    if (Test-NeedsSpendSample) { throw 'baseline should be satisfied' }
+    Update-TurnSpend ([pscustomobject]@{ Ok = $true; TotalSpendCents = 1010; FetchedAt = (Get-Date) })
+    if ($script:SpendStart -ne 1000) { throw 'baseline must not move while running' }
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'stop'; conversation_id = 'spend'; generation_id = 'spend-g'; status = 'completed' }) ''
+    Update-TurnSpend ([pscustomobject]@{ Ok = $true; TotalSpendCents = 1042; FetchedAt = (Get-Date).AddSeconds(1) })
+    if ((Get-MetaText) -notmatch '本轮约 \$0\.42') { throw "turn spend: $(Get-MetaText)" }
+
+    Initialize-State
+    Apply-Event ([pscustomobject]@{ hook_event_name = 'beforeSubmitPrompt'; conversation_id = 'stale-baseline'; generation_id = 'sb'; prompt = '旧数据' }) ''
+    Update-TurnSpend ([pscustomobject]@{ Ok = $true; TotalSpendCents = 500; FetchedAt = (Get-Date).AddMinutes(-10) })
+    if ($script:SpendStart -ge 0) { throw 'an old cached snapshot must not become the baseline' }
+
+    Initialize-State
+    $script:Settings.Mute = $true
+    $script:QuotaAlertPath = Join-Path $env:TEMP ('cursor-done-notify-alert-' + [guid]::NewGuid().ToString('n') + '.txt')
+    try {
+        $cycleEnd = (Get-Date).AddDays(9)
+        Update-QuotaAlert ([pscustomobject]@{ Ok = $true; HeadlinePercent = 60; ApiPercent = 20; CycleEnd = $cycleEnd })
+        if (Get-QuotaNotice) { throw 'no alert below 80%' }
+        Update-QuotaAlert ([pscustomobject]@{ Ok = $true; HeadlinePercent = 61; ApiPercent = 85.6; CycleEnd = $cycleEnd })
+        if ((Get-QuotaNotice) -ne '本期 API 额度已用 85%') { throw "80% alert: $(Get-QuotaNotice)" }
+        $script:QuotaNotice = ''
+        Update-QuotaAlert ([pscustomobject]@{ Ok = $true; HeadlinePercent = 62; ApiPercent = 88; CycleEnd = $cycleEnd })
+        if (Get-QuotaNotice) { throw 'the same level must alert only once per cycle' }
+        Update-QuotaAlert ([pscustomobject]@{ Ok = $true; HeadlinePercent = 101; ApiPercent = 90; CycleEnd = $cycleEnd })
+        if ((Get-QuotaNotice) -ne '本期额度已用完') { throw "100% alert: $(Get-QuotaNotice)" }
+        $script:QuotaNotice = ''
+        Update-QuotaAlert ([pscustomobject]@{ Ok = $true; HeadlinePercent = 85; ApiPercent = 10; CycleEnd = $cycleEnd.AddDays(30) })
+        if (-not (Get-QuotaNotice)) { throw 'a new billing cycle should alert again' }
+    } finally {
+        Remove-Item -LiteralPath $script:QuotaAlertPath -Force -ErrorAction SilentlyContinue
+    }
+
     Write-Output 'SELFTEST OK'
     exit 0
 }
@@ -1453,11 +1709,15 @@ if ($env:CURSOR_NOTIFY_PREVIEW -eq '1') {
         @{ Name = 'done'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '点一下就能关掉这个小家伙。'; Meta = '共用 02:04 · 11 步'; Hint = '点一下关掉 · 12s'; Pose = 'done' },
         @{ Name = 'error'; Phase = 'done'; Accent = 'red'; Headline = '这一轮出错了'; Activity = '可以回到对话里看'; Detail = '有一步没有成功'; Meta = '共用 00:40 · 3 步'; Hint = '点一下关掉 · 12s'; Pose = 'error' },
         @{ Name = 'board'; Phase = 'running'; Accent = 'red'; Headline = '1 个进行中 · 1 个出错 · 1 个已完成'; Activity = ''; Detail = ''; Meta = '共 3 个会话'; Hint = '点一行只处理这一路'; Pose = 'error'; History = $board },
-        @{ Name = 'quota'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '额度栏点一下就能展开详情。'; Meta = '共用 03:12 · 14 步'; Hint = '点一下关掉 · 12s'; Pose = 'done'; QuotaExpanded = $true }
+        @{ Name = 'quota'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '额度栏点一下就能展开详情。'; Meta = '共用 03:12 · 14 步 · 本轮约 $0.86'; Hint = '点一下关掉 · 12s'; Pose = 'done'; QuotaExpanded = $true },
+        @{ Name = 'alert'; Phase = 'running'; Accent = 'blue'; Headline = '正在处理'; Activity = '正在查找资料'; Detail = 'docs.cursor.com'; Meta = '已用 00:52 · 第 5 步'; Hint = '本期 API 额度已用 85%'; HintAlert = $true; Pose = 'web' },
+        @{ Name = 'dark'; Phase = 'done'; Accent = 'green'; Headline = '回答结束了'; Activity = 'cursor-done-notify'; Detail = '深色主题会跟着 Windows 设置走。'; Meta = '共用 01:47 · 9 步 · 本轮约 $0.31'; Hint = '点一下关掉 · 12s'; Pose = 'done'; QuotaExpanded = $true; Theme = 'dark' }
     )
     foreach ($shot in $shots) {
         $history = ''
         if ($shot.History) { $history = [string]$shot.History }
+        $form.Theme = if ($shot.Theme) { [string]$shot.Theme } else { 'light' }
+        $form.HintAlert = [bool]$shot.HintAlert
         $form.Expanded = [bool]$shot.Expanded
         $form.QuotaExpanded = [bool]$shot.QuotaExpanded
         $bmp = $form.RenderPreview($shot.Phase, $shot.Accent, $shot.Headline, $shot.Activity, $shot.Detail, $shot.Meta, $shot.Hint, $history, [single]0, [single]0, [string]$shot.Pose)
@@ -1498,13 +1758,98 @@ try {
     $script:Buddy.SpritePath = Join-Path $PSScriptRoot 'sprites\diandian.png'
     $script:Buddy.PositionPath = Join-Path (Get-StateDir) 'buddy-position.txt'
     $script:Quota = $null
+    $script:QuotaSeenVersion = -1
     $script:LastViewPhase = ''
     if (Test-QuotaEnabled) {
         $script:Quota = New-Object CursorDoneBuddy.QuotaService
         $script:Quota.CachePath = Join-Path (Get-StateDir) 'quota-cache.txt'
-        $script:Buddy.Quota = $script:Quota
         $script:Quota.Start()
     }
+
+    function Apply-Settings {
+        $script:Buddy.Theme = [string]$script:Settings.Theme
+        if ($script:Quota -and $script:Settings.Quota) {
+            $script:Buddy.Quota = $script:Quota
+        } else {
+            $script:Buddy.Quota = $null
+        }
+        $script:MuteItem.Checked = [bool]$script:Settings.Mute
+        $script:QuotaItem.Checked = [bool]($script:Quota -and $script:Settings.Quota)
+        foreach ($item in $script:ThemeItem.DropDownItems) {
+            $item.Checked = ([string]$item.Tag -eq [string]$script:Settings.Theme)
+        }
+        $script:LastSignature = ''
+    }
+
+    function New-TrayIcon {
+        $path = Join-Path $PSScriptRoot 'sprites\poses\idle-0.png'
+        if (-not (Test-Path -LiteralPath $path)) {
+            return [System.Drawing.SystemIcons]::Application
+        }
+        $source = New-Object System.Drawing.Bitmap $path
+        try {
+            $size = 64
+            $side = [int]($source.Width * 0.66)
+            $crop = New-Object System.Drawing.Rectangle ([int](($source.Width - $side) / 2)), ([int]($source.Height * 0.02)), $side, $side
+            $bitmap = New-Object System.Drawing.Bitmap $size, $size
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $graphics.DrawImage($source, (New-Object System.Drawing.Rectangle 0, 0, $size, $size), $crop, [System.Drawing.GraphicsUnit]::Pixel)
+            $graphics.Dispose()
+            return [System.Drawing.Icon]::FromHandle($bitmap.GetHicon())
+        } finally {
+            $source.Dispose()
+        }
+    }
+
+    $script:Menu = New-Object System.Windows.Forms.ContextMenuStrip
+    $script:MuteItem = New-Object System.Windows.Forms.ToolStripMenuItem '静音'
+    $script:MuteItem.Add_Click({
+        $script:Settings.Mute = -not $script:Settings.Mute
+        Save-Settings $script:Settings
+        Apply-Settings
+    })
+    $script:QuotaItem = New-Object System.Windows.Forms.ToolStripMenuItem '显示额度栏'
+    $script:QuotaItem.Enabled = [bool]$script:Quota
+    $script:QuotaItem.Add_Click({
+        $script:Settings.Quota = -not $script:Settings.Quota
+        Save-Settings $script:Settings
+        Apply-Settings
+    })
+    $script:ThemeItem = New-Object System.Windows.Forms.ToolStripMenuItem '主题'
+    foreach ($choice in @(@('auto', '跟随系统'), @('light', '浅色'), @('dark', '深色'))) {
+        $themeChoice = New-Object System.Windows.Forms.ToolStripMenuItem $choice[1]
+        $themeChoice.Tag = $choice[0]
+        $themeChoice.Add_Click({
+            param($sender)
+            $script:Settings.Theme = [string]$sender.Tag
+            Save-Settings $script:Settings
+            Apply-Settings
+        })
+        [void]$script:ThemeItem.DropDownItems.Add($themeChoice)
+    }
+    $usageItem = New-Object System.Windows.Forms.ToolStripMenuItem '打开 Cursor 用量页'
+    $usageItem.Add_Click({
+        Start-Process 'https://cursor.com/dashboard?tab=usage' | Out-Null
+    })
+    $closeItem = New-Object System.Windows.Forms.ToolStripMenuItem '先关掉点点'
+    $closeItem.Add_Click({
+        $script:Buddy.Close()
+    })
+    [void]$script:Menu.Items.Add($script:MuteItem)
+    [void]$script:Menu.Items.Add($script:QuotaItem)
+    [void]$script:Menu.Items.Add($script:ThemeItem)
+    [void]$script:Menu.Items.Add($usageItem)
+    [void]$script:Menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    [void]$script:Menu.Items.Add($closeItem)
+    $script:Buddy.ContextMenuStrip = $script:Menu
+
+    $script:Tray = New-Object System.Windows.Forms.NotifyIcon
+    $script:Tray.Icon = New-TrayIcon
+    $script:Tray.Text = '点点'
+    $script:Tray.ContextMenuStrip = $script:Menu
+    $script:Tray.Visible = $true
+    Apply-Settings
     $script:Buddy.Add_DismissRequested({
         $script:Buddy.Close()
     })
@@ -1527,13 +1872,33 @@ try {
                 $script:Buddy.Close()
                 return
             }
+            if ($script:Quota) {
+                $version = $script:Quota.Version
+                if ($version -ne $script:QuotaSeenVersion) {
+                    $script:QuotaSeenVersion = $version
+                    $snapshot = $script:Quota.Latest
+                    Update-TurnSpend $snapshot
+                    if ($script:Settings.Quota) {
+                        Update-QuotaAlert $snapshot
+                    }
+                }
+                if (Test-NeedsSpendSample) {
+                    $script:Quota.RequestRefresh()
+                }
+            }
             $view = Get-Presentation
             if ($script:Quota -and $view.Phase -eq 'done' -and $script:LastViewPhase -ne 'done') {
                 $script:Quota.RequestRefresh()
             }
             $script:LastViewPhase = [string]$view.Phase
+            $notice = Get-QuotaNotice
+            $hintAlert = -not [string]::IsNullOrEmpty($notice)
+            if ($hintAlert) {
+                $view.Hint = $notice
+            }
             $history = [string]$view.History
             $signature = @(
+                [string]$hintAlert,
                 [string]$view.Phase,
                 [string]$view.Accent,
                 [string]$view.Headline,
@@ -1546,6 +1911,7 @@ try {
             ) -join "`n"
             if ($signature -ne $script:LastSignature) {
                 $script:LastSignature = $signature
+                $script:Buddy.HintAlert = $hintAlert
                 $script:Buddy.SetContent(
                     [string]$view.Phase,
                     [string]$view.Accent,
@@ -1613,12 +1979,24 @@ try {
         if ($script:Quota) {
             $script:Quota.Dispose()
         }
+        if ($script:Tray) {
+            $script:Tray.Visible = $false
+            $script:Tray.Dispose()
+            $script:Tray = $null
+        }
     })
 
     Update-Buddy
     Place-Buddy
     [System.Windows.Forms.Application]::Run($script:Buddy)
 } finally {
+    if ($script:Tray) {
+        try {
+            $script:Tray.Visible = $false
+            $script:Tray.Dispose()
+        } catch {
+        }
+    }
     try {
         if (Test-Path -LiteralPath $pidFile) {
             $current = (Read-Utf8File $pidFile).Trim()

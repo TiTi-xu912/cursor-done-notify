@@ -25,8 +25,9 @@ function Stop-BuddyHost {
     if ($env:CURSOR_NOTIFY_SKIP_STOP -eq '1') {
         return
     }
-    $hostScript = Join-Path $PSScriptRoot 'progress-host.ps1'
-    $hostPattern = [regex]::Escape($hostScript)
+    $hostPattern = (@($PSScriptRoot, $installRoot) | Select-Object -Unique | ForEach-Object {
+        [regex]::Escape((Join-Path $_ 'progress-host.ps1'))
+    }) -join '|'
     $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         ($_.Name -eq 'powershell.exe' -or $_.Name -eq 'pwsh.exe') -and
         $_.CommandLine -match $hostPattern
@@ -44,7 +45,7 @@ function Clear-BuddyState {
     if (-not (Test-Path -LiteralPath $stateDir)) {
         return
     }
-    foreach ($name in @('inbox', 'responses', 'live-view.txt', 'last-error.txt', 'last-popup-ok.txt', 'host.pid', 'quota-cache.txt')) {
+    foreach ($name in @('inbox', 'responses', 'live-view.txt', 'last-error.txt', 'last-popup-ok.txt', 'host.pid', 'quota-cache.txt', 'quota-alert.txt')) {
         Remove-Item -LiteralPath (Join-Path $stateDir $name) -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -135,34 +136,75 @@ function ConvertTo-PowerShellLiteral([string]$Text) {
     return "'" + ($Text -replace "'", "''") + "'"
 }
 
-function Get-OwnedHookCommands {
-    $relay = Join-Path $PSScriptRoot 'hook-relay.exe'
-    $quotedRelay = '& ' + (ConvertTo-PowerShellLiteral $relay)
-    $commands = New-Object System.Collections.Generic.HashSet[string] ([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($reply in @('empty', 'allow', 'continue')) {
-        [void]$commands.Add(("$relay $reply").Trim())
-        [void]$commands.Add(("$quotedRelay $reply").Trim())
+# The same folder can be spelled as an 8.3 short path or a long path; compare the long form.
+function Get-LongPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ''
     }
-    return ,$commands
+    if (-not ('CursorDoneNotify.PathApi' -as [type])) {
+        Add-Type -Namespace CursorDoneNotify -Name PathApi -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint bufferLength);
+'@
+    }
+    try {
+        $full = [System.IO.Path]::GetFullPath($Path)
+    } catch {
+        return $Path
+    }
+    $existing = $full
+    $rest = ''
+    while ($existing -and -not (Test-Path -LiteralPath $existing)) {
+        $leaf = Split-Path -Leaf $existing
+        $rest = if ($rest) { Join-Path $leaf $rest } else { $leaf }
+        $existing = Split-Path -Parent $existing
+    }
+    if (-not $existing) {
+        return $full
+    }
+    $buffer = New-Object System.Text.StringBuilder 1024
+    $length = [CursorDoneNotify.PathApi]::GetLongPathName($existing, $buffer, [uint32]$buffer.Capacity)
+    if ($length -gt 0 -and $length -lt $buffer.Capacity) {
+        $existing = $buffer.ToString()
+    }
+    if ($rest) {
+        return (Join-Path $existing $rest)
+    }
+    return $existing
 }
 
-function Test-OwnedHook([string]$Command, $OwnedCommands) {
+$installRoot = Get-LongPath $PSScriptRoot
+$relayExe = Join-Path $installRoot 'hook-relay.exe'
+
+function Get-HookRelayPath([string]$Command) {
+    $pattern = "^(?:&\s*'(?<path>(?:[^']|'')+)'|(?<path>.+?\.exe))\s+(?:empty|allow|continue)$"
+    $match = [regex]::Match($Command.Trim(), $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $match.Success) {
+        return ''
+    }
+    return ($match.Groups['path'].Value -replace "''", "'")
+}
+
+function Test-OwnedHook([string]$Command) {
     if ([string]::IsNullOrWhiteSpace($Command)) {
         return $false
     }
-    if ($OwnedCommands.Contains($Command.Trim())) {
+    $path = Get-HookRelayPath $Command
+    if ($path -and [string]::Equals((Get-LongPath $path), $relayExe, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $true
     }
-    foreach ($legacyName in @('notify-done.ps1', 'notify-done.cmd')) {
-        $legacyPath = Join-Path $PSScriptRoot $legacyName
-        if ($Command.IndexOf($legacyPath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            return $true
+    foreach ($root in @($PSScriptRoot, $installRoot)) {
+        foreach ($legacyName in @('notify-done.ps1', 'notify-done.cmd')) {
+            $legacyPath = Join-Path $root $legacyName
+            if ($Command.IndexOf($legacyPath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                return $true
+            }
         }
     }
     return $false
 }
 
-function Get-KeptHooks($Existing, $OwnedCommands) {
+function Get-KeptHooks($Existing) {
     $kept = New-Object System.Collections.ArrayList
     if ($Existing) {
         foreach ($item in @($Existing)) {
@@ -170,7 +212,7 @@ function Get-KeptHooks($Existing, $OwnedCommands) {
             if ($null -ne $item -and $item.PSObject.Properties.Name -contains 'command') {
                 $cmd = [string]$item.command
             }
-            if ([string]::IsNullOrWhiteSpace($cmd) -or -not (Test-OwnedHook $cmd $OwnedCommands)) {
+            if ([string]::IsNullOrWhiteSpace($cmd) -or -not (Test-OwnedHook $cmd)) {
                 [void]$kept.Add($item)
             }
         }
@@ -259,12 +301,11 @@ if ($Uninstall) {
     }
     Invoke-WithHooksLock {
         $cfg = Read-HooksConfig
-        $ownedCommands = Get-OwnedHookCommands
         $next = @{}
         $removed = 0
         foreach ($name in @($cfg.hooks.Keys)) {
             $before = @($cfg.hooks[$name]).Count
-            $kept = Get-KeptHooks $cfg.hooks[$name] $ownedCommands
+            $kept = Get-KeptHooks $cfg.hooks[$name]
             $removed += ($before - $kept.Count)
             if ($kept.Count -gt 0) {
                 $next[$name] = $kept
@@ -287,7 +328,6 @@ if ($env:CURSOR_NOTIFY_SKIP_BUILD -ne '1') {
     Build-Buddy
 }
 
-$relayExe = Join-Path $PSScriptRoot 'hook-relay.exe'
 if (-not (Test-Path -LiteralPath $relayExe)) {
     throw "Missing hook relay: $relayExe"
 }
@@ -296,7 +336,6 @@ $command = '& ' + (ConvertTo-PowerShellLiteral $relayExe)
 
 Invoke-WithHooksLock {
     $cfg = Read-HooksConfig
-    $ownedCommands = Get-OwnedHookCommands
     $hookSpecs = @(
         @{ Name = 'beforeSubmitPrompt'; Reply = 'continue'; Timeout = 5 },
         @{ Name = 'postToolUse'; Reply = 'empty'; Timeout = 5 },
@@ -314,7 +353,7 @@ Invoke-WithHooksLock {
     }
 
     foreach ($name in @($cfg.hooks.Keys)) {
-        $kept = Get-KeptHooks $cfg.hooks[$name] $ownedCommands
+        $kept = Get-KeptHooks $cfg.hooks[$name]
         if ($kept.Count -gt 0) {
             $cfg.hooks[$name] = $kept
         } else {
@@ -322,7 +361,7 @@ Invoke-WithHooksLock {
         }
     }
     foreach ($spec in $hookSpecs) {
-        $kept = Get-KeptHooks $cfg.hooks[$spec.Name] $ownedCommands
+        $kept = Get-KeptHooks $cfg.hooks[$spec.Name]
         [void]$kept.Add(@{
             command = "$command $($spec.Reply)"
             timeout = $spec.Timeout

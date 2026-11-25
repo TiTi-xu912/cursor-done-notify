@@ -20,9 +20,9 @@ A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent tu
 | --- | --- | --- |
 | <img src="docs/screenshots/done.png" width="240" alt="回答结束"> | <img src="docs/screenshots/error.png" width="240" alt="出错"> | <img src="docs/screenshots/board.png" width="240" alt="多个会话"> |
 
-| 额度详情 |
-| --- |
-| <img src="docs/screenshots/quota.png" width="240" alt="额度详情"> |
+| 额度详情 | 额度提醒 | 深色主题 |
+| --- | --- | --- |
+| <img src="docs/screenshots/quota.png" width="240" alt="额度详情"> | <img src="docs/screenshots/alert.png" width="240" alt="额度提醒"> | <img src="docs/screenshots/dark.png" width="240" alt="深色主题"> |
 
 ## 动作
 
@@ -35,6 +35,12 @@ A Windows desktop buddy for [Cursor](https://cursor.com). It follows an Agent tu
 | 命令 | 搜索 | 完成 | 出错 |
 | --- | --- | --- | --- |
 | <img src="sprites/poses/terminal.gif" width="120" alt="命令"> | <img src="sprites/poses/search.gif" width="120" alt="搜索"> | <img src="sprites/poses/done.gif" width="120" alt="完成"> | <img src="sprites/poses/error.gif" width="120" alt="出错"> |
+
+| 派子任务 | 查资料 | 已中断 | 打瞌睡 |
+| --- | --- | --- | --- |
+| <img src="sprites/poses/delegate.gif" width="120" alt="派子任务"> | <img src="sprites/poses/web.gif" width="120" alt="查资料"> | <img src="sprites/poses/stop.gif" width="120" alt="已中断"> | <img src="sprites/poses/sleep.gif" width="120" alt="打瞌睡"> |
+
+查资料也用于网页搜索和外部（MCP）工具。一轮进行中超过 90 秒没有新事件、也没有工具在跑时，点点会打瞌睡；会话失去连接时也是这个动作。
 
 这是一个非官方工具，和 Cursor 没有隶属关系。
 
@@ -74,8 +80,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnableRealtim
 - 这一轮结束、中断或出错后，点窗口就能关掉；也可以等它自己消失。
 - 右上角的关闭同样有效。
 - 好几个对话同时在跑时，窗口变成总览。点一行就盯住这一路，并尝试把对应工作区的 Cursor 窗口调到前面；再点一次回到总览。已经结束的那一行，点一下就从总览里去掉。
+- 右键点窗口，或者点任务栏托盘里的点点图标，会弹出菜单：静音、显示额度栏、主题（跟随系统、浅色、深色）、打开 Cursor 用量页、先关掉点点。这些选择保存在 `%APPDATA%\cursor-done-notify\settings.txt`，立即生效，不用重启 Cursor。
 
-结束时的声音沿用 Windows 系统音：正常完成、中断、出错各一声。
+结束时的声音沿用 Windows 系统音：正常完成、中断、出错各一声。静音后不再响。
+
+主题默认跟随 Windows 的“应用模式”，深色模式下气泡变深。
 
 默认停留 12 秒。要改的话，设置用户环境变量 `CURSOR_NOTIFY_SECONDS`（允许 3 到 60），然后完全退出 Cursor 再打开：
 
@@ -95,7 +104,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnableRealtim
 
 数据来自 Cursor 自己的用量接口（`api2.cursor.sh` 上的 `DashboardService`），和 Cursor 设置页看到的是同一份。点点从本机 `%APPDATA%\Cursor\User\globalStorage\state.vscdb` 读取 Cursor 已保存的登录令牌，只发给 Cursor 的服务器，不保存也不发给别处。窗口出现时拉一次，之后每 5 分钟、每轮结束时、以及展开详情时刷新（两次之间至少隔 20 秒）。结果缓存在 `%TEMP%\cursor-done-notify\quota-cache.txt`，只有数字，没有令牌；下次出现时先显示缓存。
 
-不想显示额度，可以关掉：
+一轮结束时，元信息行会多一段“本轮约 $0.42”：这一轮开始后第一次拉到的已用金额，和结束后最新一次的差。Cursor 记账有延迟，最后几次请求可能还没算进去，所以只是估算；如果同时还有别的对话在跑，会写成“期间约”，因为额度是整个账号共用的。
+
+综合用量或 API 用量第一次超过 80%、第一次用完时，提示行会变成橙色提醒并响一声，每个账单周期每档只提醒一次。
+
+不想看额度栏，在右键菜单里取消“显示额度栏”即可。想彻底不查询额度（也就不会有每轮花费和提醒），设置：
 
 ```powershell
 [Environment]::SetEnvironmentVariable('CURSOR_NOTIFY_QUOTA', '0', 'User')
@@ -103,7 +116,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnableRealtim
 
 ## 卸载
 
-双击 `uninstall.cmd`。它会关掉点点，只从 `hooks.json` 里删掉当前安装目录对应的条目，并清理临时事件、摘要和错误日志；窗口位置会保留。然后完全退出 Cursor 再打开。
+双击 `uninstall.cmd`。它会关掉点点，只从 `hooks.json` 里删掉当前安装目录对应的条目，并清理临时事件、摘要和错误日志；窗口位置和右键菜单里的设置会保留。然后完全退出 Cursor 再打开。
 
 ## 它怎么工作
 

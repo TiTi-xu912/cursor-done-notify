@@ -29,6 +29,29 @@ $relay = Join-Path $installRoot 'hook-relay.exe'
 & $csc /nologo /warn:4 /target:exe "/out:$relay" (Join-Path $installRoot 'HookRelay.cs')
 if ($LASTEXITCODE -ne 0) { throw 'test relay compile failed' }
 
+if (-not ('CursorDoneNotify.PathApi' -as [type])) {
+    Add-Type -Namespace CursorDoneNotify -Name PathApi -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint bufferLength);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern uint GetShortPathName(string longPath, System.Text.StringBuilder shortPath, uint bufferLength);
+'@
+}
+$buffer = New-Object System.Text.StringBuilder 1024
+[void][CursorDoneNotify.PathApi]::GetLongPathName($relay, $buffer, [uint32]$buffer.Capacity)
+$relayLong = $buffer.ToString()
+$buffer = New-Object System.Text.StringBuilder 1024
+[void][CursorDoneNotify.PathApi]::GetShortPathName($relay, $buffer, [uint32]$buffer.Capacity)
+$relayShort = $buffer.ToString()
+if (-not $relayLong -or -not $relayShort) { throw 'could not resolve relay path forms' }
+
+function Test-RelayCommand([string]$Command) {
+    foreach ($form in @($relay, $relayLong, $relayShort)) {
+        if ($Command.IndexOf($form, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+    }
+    return $false
+}
+
 $hooks = Join-Path $fakeHome '.cursor\hooks.json'
 $foreign = 'C:\keep\hook-relay.exe empty'
 $other = 'C:\keep\other-hook.cmd'
@@ -40,6 +63,8 @@ $utf8 = New-Object System.Text.UTF8Encoding $false
         stop = @(
             @{ command = $foreign; timeout = 10; futureField = 'keep-me' }
             @{ command = "$relay empty"; timeout = 5 }
+            @{ command = "$relayShort empty"; timeout = 5 }
+            @{ command = "& '$relayLong' empty"; timeout = 5 }
         )
         preToolUse = @(
             @{ command = "$relay allow"; timeout = 5 }
@@ -70,10 +95,11 @@ try {
     & $installer
     $stop = Get-Commands 'stop'
     $pre = Get-Commands 'preToolUse'
-    $expected = "& '$relay' empty"
+    $expected = "& '$relayLong' empty"
     if (@($stop | Where-Object { $_ -eq $foreign }).Count -ne 1) { throw "install dropped a same-named foreign hook: $($stop -join ' | ')" }
     if (@($stop | Where-Object { $_ -eq $expected }).Count -ne 1) { throw "install did not quote a spaced path: $($stop -join ' | ')" }
-    if (@($pre | Where-Object { $_ -like "*$relay*" }).Count -ne 0) { throw 'safe install kept a permission hook' }
+    if (@($stop | Where-Object { Test-RelayCommand $_ }).Count -ne 1) { throw "install left another spelling of its own hook: $($stop -join ' | ')" }
+    if (@($pre | Where-Object { Test-RelayCommand $_ }).Count -ne 0) { throw 'safe install kept a permission hook' }
     $parsed = Get-Content -LiteralPath $hooks -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($parsed.futureTopLevel -ne 'keep-me') { throw 'install dropped an unknown top-level field' }
     $foreignItem = @($parsed.hooks.stop | Where-Object { $_.command -eq $foreign })[0]
@@ -86,13 +112,13 @@ try {
 
     & $installer -EnablePermissionHooks
     $pre = Get-Commands 'preToolUse'
-    if (@($pre | Where-Object { $_ -eq "& '$relay' allow" }).Count -ne 1) { throw 'opt-in permission hook was not installed' }
+    if (@($pre | Where-Object { $_ -eq "& '$relayLong' allow" }).Count -ne 1) { throw 'opt-in permission hook was not installed' }
 
     & $installer -Uninstall
     $stop = Get-Commands 'stop'
     $pre = Get-Commands 'preToolUse'
     if (@($stop | Where-Object { $_ -eq $foreign }).Count -ne 1) { throw "uninstall dropped the other hook: $($stop -join ' | ')" }
-    if (@($stop + $pre | Where-Object { $_ -like "*$relay*" }).Count -ne 0) { throw 'uninstall left an owned relay hook' }
+    if (@($stop + $pre | Where-Object { Test-RelayCommand $_ }).Count -ne 0) { throw 'uninstall left an owned relay hook' }
     $parsed = Get-Content -LiteralPath $hooks -Raw -Encoding UTF8 | ConvertFrom-Json
     $promptItem = @($parsed.hooks.beforeSubmitPrompt | Where-Object { $_.type -eq 'prompt' })[0]
     if ($promptItem.prompt -ne 'Keep this policy') { throw 'uninstall dropped a prompt hook without a command' }

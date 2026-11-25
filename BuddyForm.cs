@@ -8,6 +8,7 @@ using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace CursorDoneBuddy
 {
@@ -67,6 +68,8 @@ namespace CursorDoneBuddy
         Graphics _measure;
         Spot _layout;
 
+        string _theme = "auto";
+        bool _dark;
         QuotaService _quota;
         int _quotaVersion = -1;
         bool _quotaExpanded;
@@ -104,7 +107,9 @@ namespace CursorDoneBuddy
             _singleRight.Alignment = StringAlignment.Far;
             _wrap = new StringFormat();
             _wrap.Trimming = StringTrimming.EllipsisCharacter;
+            _wrap.FormatFlags = StringFormatFlags.LineLimit;
             ClientSize = new Size((int)Math.Round(Px(360)), (int)Math.Round(Px(168)));
+            UpdateTheme();
         }
 
         public string PositionPath { get; set; }
@@ -137,6 +142,48 @@ namespace CursorDoneBuddy
             set { _quotaExpanded = value; InvalidateLayout(); }
         }
 
+        public bool HintAlert { get; set; }
+
+        public string Theme
+        {
+            get { return _theme; }
+            set
+            {
+                _theme = value == "light" || value == "dark" ? value : "auto";
+                UpdateTheme();
+            }
+        }
+
+        Palette P
+        {
+            get { return _dark ? DarkPalette : LightPalette; }
+        }
+
+        void UpdateTheme()
+        {
+            bool dark = _theme == "dark" || (_theme == "auto" && SystemUsesDarkApps());
+            if (dark == _dark) return;
+            _dark = dark;
+            InvalidateLayout();
+            if (_shown) PresentFrame();
+        }
+
+        static bool SystemUsesDarkApps()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                {
+                    object value = key == null ? null : key.GetValue("AppsUseLightTheme");
+                    return value is int && (int)value == 0;
+                }
+            }
+            catch (System.Security.SecurityException)
+            {
+                return false;
+            }
+        }
+
         public static void EnableDpi()
         {
             try { SetProcessDPIAware(); } catch { }
@@ -147,7 +194,7 @@ namespace CursorDoneBuddy
             string nextPhase = string.IsNullOrEmpty(phase) ? "idle" : phase;
             string nextPose = string.IsNullOrEmpty(pose) ? "idle" : pose;
             bool poseChange = nextPose != _pose;
-            bool urgent = nextPose == "done" || nextPose == "error";
+            bool urgent = nextPose == "done" || nextPose == "error" || nextPose == "stop";
             int shown = _poseSince == 0 ? 1000 : Environment.TickCount - _poseSince;
             bool queue = poseChange && !urgent && shown >= 0 && shown < 560 && !string.IsNullOrEmpty(_headline);
             if (queue)
@@ -291,6 +338,11 @@ namespace CursorDoneBuddy
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
+            if (e.Button != MouseButtons.Left)
+            {
+                base.OnMouseDown(e);
+                return;
+            }
             _grab = e.Location;
             _lastDragX = MousePosition.X;
             _dragged = false;
@@ -321,6 +373,11 @@ namespace CursorDoneBuddy
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
+            if (e.Button != MouseButtons.Left)
+            {
+                base.OnMouseUp(e);
+                return;
+            }
             if (_downOnClose)
             {
                 RaiseDismiss();
@@ -405,6 +462,7 @@ namespace CursorDoneBuddy
                 draw = true;
             }
             if (AdvanceAnimations()) draw = true;
+            if (_theme == "auto" && _tick % 45 == 0) UpdateTheme();
             if (_quota != null && _quota.Version != _quotaVersion)
             {
                 _quotaVersion = _quota.Version;
@@ -504,8 +562,8 @@ namespace CursorDoneBuddy
             RectangleF bubble = layout.Bubble;
             float radius = Px(18);
             using (GraphicsPath path = Rounded(bubble, radius))
-            using (SolidBrush fill = new SolidBrush(Color.FromArgb(248, 255, 250, 244)))
-            using (Pen pen = new Pen(Color.FromArgb(255, 232, 214, 190), Math.Max(1f, Px(1.4f))))
+            using (SolidBrush fill = new SolidBrush(P.BubbleFill))
+            using (Pen pen = new Pen(P.BubbleBorder, Math.Max(1f, Px(1.4f))))
             {
                 g.FillPath(fill, path);
                 g.DrawPath(pen, path);
@@ -518,10 +576,10 @@ namespace CursorDoneBuddy
                 g.FillEllipse(dotBrush, layout.TextX, layout.Headline.Y + (layout.Headline.Height - dot) / 2f, dot, dot);
             }
 
-            using (SolidBrush title = new SolidBrush(Color.FromArgb(255, 44, 36, 22)))
-            using (SolidBrush body = new SolidBrush(Color.FromArgb(255, 63, 52, 40)))
-            using (SolidBrush muted = new SolidBrush(Color.FromArgb(255, 122, 110, 96)))
-            using (SolidBrush faint = new SolidBrush(Color.FromArgb(255, 156, 146, 132)))
+            using (SolidBrush title = new SolidBrush(P.Title))
+            using (SolidBrush body = new SolidBrush(P.Body))
+            using (SolidBrush muted = new SolidBrush(P.Muted))
+            using (SolidBrush faint = new SolidBrush(P.Faint))
             {
                 RectangleF headline = layout.Headline;
                 headline.X += dot + Px(6);
@@ -535,7 +593,7 @@ namespace CursorDoneBuddy
                 }
                 if (layout.HasHistory)
                 {
-                    using (Pen line = new Pen(Color.FromArgb(255, 236, 226, 210), Math.Max(1f, Px(1f))))
+                    using (Pen line = new Pen(P.Divider, Math.Max(1f, Px(1f))))
                     {
                         g.DrawLine(line, layout.TextX, layout.History.Y - Px(5), layout.TextX + layout.TextW, layout.History.Y - Px(5));
                     }
@@ -546,13 +604,23 @@ namespace CursorDoneBuddy
                         g.DrawString(_history, _fontHint, muted, layout.History, _wrap);
                     }
                 }
-                g.DrawString(_hint, _fontHint, faint, layout.Hint, _single);
+                if (HintAlert)
+                {
+                    using (SolidBrush warn = new SolidBrush(P.Warn))
+                    {
+                        g.DrawString(_hint, _fontHint, warn, layout.Hint, _single);
+                    }
+                }
+                else
+                {
+                    g.DrawString(_hint, _fontHint, faint, layout.Hint, _single);
+                }
             }
             if (layout.HasQuota) DrawQuota(g, layout);
 
             RectangleF close = layout.Close;
-            using (SolidBrush closeFill = new SolidBrush(Color.FromArgb(255, 244, 232, 216)))
-            using (Pen closePen = new Pen(Color.FromArgb(255, 120, 96, 72), Math.Max(1.2f, Px(1.4f))))
+            using (SolidBrush closeFill = new SolidBrush(P.CloseFill))
+            using (Pen closePen = new Pen(P.CloseMark, Math.Max(1.2f, Px(1.4f))))
             {
                 closePen.StartCap = LineCap.Round;
                 closePen.EndCap = LineCap.Round;
@@ -630,16 +698,16 @@ namespace CursorDoneBuddy
         void DrawQuota(Graphics g, Spot layout)
         {
             RectangleF area = layout.Quota;
-            using (Pen line = new Pen(Color.FromArgb(255, 236, 226, 210), Math.Max(1f, Px(1f))))
+            using (Pen line = new Pen(P.Divider, Math.Max(1f, Px(1f))))
             {
                 g.DrawLine(line, area.X, area.Y - Px(5), area.Right, area.Y - Px(5));
             }
             float y = area.Y;
-            using (SolidBrush ink = new SolidBrush(Color.FromArgb(255, 63, 52, 40)))
-            using (SolidBrush muted = new SolidBrush(Color.FromArgb(255, 122, 110, 96)))
-            using (SolidBrush faint = new SolidBrush(Color.FromArgb(255, 156, 146, 132)))
-            using (SolidBrush warn = new SolidBrush(Color.FromArgb(255, 196, 112, 20)))
-            using (SolidBrush track = new SolidBrush(Color.FromArgb(255, 238, 228, 212)))
+            using (SolidBrush ink = new SolidBrush(P.Body))
+            using (SolidBrush muted = new SolidBrush(P.Muted))
+            using (SolidBrush faint = new SolidBrush(P.Faint))
+            using (SolidBrush warn = new SolidBrush(P.Warn))
+            using (SolidBrush track = new SolidBrush(P.Track))
             {
                 for (int i = 0; i < layout.QuotaRows.Count; i++)
                 {
@@ -712,7 +780,7 @@ namespace CursorDoneBuddy
             float spriteH = layout.SpriteH > 1f ? layout.SpriteH : layout.BodyR * 2f;
             _characterRect = new RectangleF(cx - spriteW / 2f, cy - spriteH / 2f, spriteW, spriteH);
 
-            using (SolidBrush shadow = new SolidBrush(Color.FromArgb(40, 120, 78, 36)))
+            using (SolidBrush shadow = new SolidBrush(P.Shadow))
             {
                 g.FillEllipse(shadow, cx - spriteW * 0.22f, cy + spriteH * 0.36f, spriteW * 0.44f, spriteH * 0.07f);
             }
@@ -815,7 +883,7 @@ namespace CursorDoneBuddy
             if (!string.IsNullOrEmpty(_queuedPose))
             {
                 int shown = Environment.TickCount - _poseSince;
-                if (shown >= 560 || _queuedPose == "done" || _queuedPose == "error")
+                if (shown >= 560 || _queuedPose == "done" || _queuedPose == "error" || _queuedPose == "stop")
                 {
                     _queuedPose = null;
                     FlushPending();
@@ -953,6 +1021,11 @@ namespace CursorDoneBuddy
                     delays[1] = 90;
                     if (delays.Length > 2) delays[2] = 360;
                     if (delays.Length > 3) delays[3] = 420;
+                }
+                if (pose == "sleep")
+                {
+                    int[] slow = new int[] { 520, 620, 720, 520 };
+                    for (int i = 0; i < delays.Length; i++) delays[i] = slow[i % slow.Length];
                 }
                 if (pose == "terminal")
                 {
@@ -1214,7 +1287,7 @@ namespace CursorDoneBuddy
                 else if (mark == "warn") color = Color.FromArgb(255, 224, 138, 30);
                 float dot = Px(7);
                 using (SolidBrush dotBrush = new SolidBrush(color))
-                using (SolidBrush ink = new SolidBrush(Color.FromArgb(255, 63, 52, 40)))
+                using (SolidBrush ink = new SolidBrush(P.Body))
                 {
                     g.FillEllipse(dotBrush, area.X, y + (row - dot) / 2f, dot, dot);
                     RectangleF lineRect = new RectangleF(area.X + dot + Px(6), y, Math.Max(1f, area.Width - dot - Px(6)), row);
@@ -1252,7 +1325,10 @@ namespace CursorDoneBuddy
         void EnsureSprites()
         {
             if (_sprites != null || string.IsNullOrEmpty(SpritePath) || !File.Exists(SpritePath)) return;
-            _sprites = new Bitmap(SpritePath);
+            using (Bitmap loaded = new Bitmap(SpritePath))
+            {
+                _sprites = new Bitmap(loaded);
+            }
         }
 
 
@@ -1638,6 +1714,54 @@ namespace CursorDoneBuddy
             public bool HasHistory;
             public bool HasQuota;
         }
+
+        sealed class Palette
+        {
+            public Color BubbleFill;
+            public Color BubbleBorder;
+            public Color Title;
+            public Color Body;
+            public Color Muted;
+            public Color Faint;
+            public Color Divider;
+            public Color CloseFill;
+            public Color CloseMark;
+            public Color Warn;
+            public Color Track;
+            public Color Shadow;
+        }
+
+        static readonly Palette LightPalette = new Palette
+        {
+            BubbleFill = Color.FromArgb(248, 255, 250, 244),
+            BubbleBorder = Color.FromArgb(255, 232, 214, 190),
+            Title = Color.FromArgb(255, 44, 36, 22),
+            Body = Color.FromArgb(255, 63, 52, 40),
+            Muted = Color.FromArgb(255, 122, 110, 96),
+            Faint = Color.FromArgb(255, 156, 146, 132),
+            Divider = Color.FromArgb(255, 236, 226, 210),
+            CloseFill = Color.FromArgb(255, 244, 232, 216),
+            CloseMark = Color.FromArgb(255, 120, 96, 72),
+            Warn = Color.FromArgb(255, 196, 112, 20),
+            Track = Color.FromArgb(255, 238, 228, 212),
+            Shadow = Color.FromArgb(40, 120, 78, 36)
+        };
+
+        static readonly Palette DarkPalette = new Palette
+        {
+            BubbleFill = Color.FromArgb(244, 36, 37, 43),
+            BubbleBorder = Color.FromArgb(255, 74, 76, 86),
+            Title = Color.FromArgb(255, 242, 238, 230),
+            Body = Color.FromArgb(255, 220, 214, 204),
+            Muted = Color.FromArgb(255, 168, 162, 152),
+            Faint = Color.FromArgb(255, 128, 124, 118),
+            Divider = Color.FromArgb(255, 60, 62, 70),
+            CloseFill = Color.FromArgb(255, 56, 58, 66),
+            CloseMark = Color.FromArgb(255, 200, 196, 188),
+            Warn = Color.FromArgb(255, 240, 166, 70),
+            Track = Color.FromArgb(255, 62, 64, 74),
+            Shadow = Color.FromArgb(70, 0, 0, 0)
+        };
 
         class QuotaRow
         {
