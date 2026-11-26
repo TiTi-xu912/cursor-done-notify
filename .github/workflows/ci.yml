@@ -24,3 +24,40 @@ jobs:
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\package.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: proto/buddy-rs
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Unit tests (state machine, quota, updates, relay)
+        run: cargo test
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Relay and installer checks
+        if: runner.os == 'Windows'
+        shell: powershell
+        working-directory: .
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\relay-rs.ps1 -Relay .\proto\buddy-rs\target\release\hook-relay.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Render snapshots
+        if: runner.os == 'macOS'
+        run: ./target/release/buddy-host --snapshot "$RUNNER_TEMP/snapshots"
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: macos-snapshots
+          path: ${{ runner.temp }}/snapshots

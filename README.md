@@ -75,6 +75,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnableRealtim
 
 更新配置前会在同目录保留一份 `hooks.json.bak`；写入使用临时文件替换，避免中途退出损坏配置。
 
+### Rust 版（预览）
+
+`proto/buddy-rs` 里是用 Rust 重写的同一套程序，功能和行为与默认版本一致，常驻内存约 16 MB（默认版本约 60 MB），中继每次调用也更快。它也是以后支持 macOS 的基础。
+
+- 用 zip 安装：下载 Releases 里名字带 `-rust` 的 zip，解压后双击 `install.cmd`，不需要装 Rust。
+- 用 git 安装：装好 [Rust](https://rustup.rs) 后运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Engine rust`（实时模式再加 `-EnableRealtime`）。
+
+两个版本读写同一份设置、缓存和收件箱，可以随时切换；在 git 目录里直接双击 `install.cmd` 会换回默认版本。
+
 ## 使用
 
 - 拖动窗口可以搬家，松手后位置会记住。
@@ -158,6 +167,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\hooks.ps1
 ```
 
 改完任何 `.cs` 文件后，再运行一次 `install.cmd`。
+
+Rust 版的测试在 `proto/buddy-rs` 里运行 `cargo test`（状态机、额度、更新检查和中继），中继和安装的端到端检查是 `tests\relay-rs.ps1`。`buddy-host.exe --snapshot <目录>` 会把几种典型画面画成 PNG，不打开窗口。
 
 发布新版本：先把 `Host.cs` 里的 `AppInfo.Version` 改成新版本号并提交，再推送同名 tag（比如 `v1.2.0`）。`.github/workflows/release.yml` 会跑测试，用 `tools/package.ps1` 编译并打包，然后创建 Release。tag 和代码里的版本号对不上时打包会失败。本地也可以直接运行 `tools\package.ps1`，zip 写在 `dist` 目录。编译产物 `hook-relay.exe` 和 `buddy-host.exe` 不进版本库。
 

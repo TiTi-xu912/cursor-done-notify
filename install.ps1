@@ -1,9 +1,12 @@
 ﻿# Build the buddy and register it with the user-level Cursor hook.
 # Pass -Uninstall to stop the buddy and remove only its hook entries.
+# Pass -Engine rust to install the Rust build from proto\buddy-rs instead of compiling the C# sources.
 param(
     [switch]$Uninstall,
     [Alias('EnableRealtime')]
-    [switch]$EnablePermissionHooks
+    [switch]$EnablePermissionHooks,
+    [ValidateSet('csharp', 'rust')]
+    [string]$Engine = 'csharp'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,8 +32,9 @@ function Stop-BuddyHost {
     $legacyPattern = ($roots | ForEach-Object { [regex]::Escape((Join-Path $_ 'progress-host.ps1')) }) -join '|'
     $hostPaths = @($roots | ForEach-Object { Join-Path $_ 'buddy-host.exe' })
     $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        ($_.Name -eq 'buddy-host.exe' -and $_.ExecutablePath -and
-            @($hostPaths | Where-Object { [string]::Equals($_, (Get-LongPath $_.ExecutablePath), [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) -or
+        $exePath = if ($_.ExecutablePath) { Get-LongPath $_.ExecutablePath } else { '' }
+        ($_.Name -eq 'buddy-host.exe' -and $exePath -and
+            @($hostPaths | Where-Object { [string]::Equals($_, $exePath, [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) -or
         (($_.Name -eq 'powershell.exe' -or $_.Name -eq 'pwsh.exe') -and $_.CommandLine -match $legacyPattern)
     })
     foreach ($proc in $procs) {
@@ -74,6 +78,54 @@ function Build-Buddy {
         Remove-Item -LiteralPath (Join-Path $root 'BuddyForm.dll') -Force -ErrorAction SilentlyContinue
     } finally {
         Remove-Item -LiteralPath $buildDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-Cargo {
+    $found = Get-Command cargo -ErrorAction SilentlyContinue
+    if ($found) {
+        return $found.Source
+    }
+    $default = Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe'
+    if (Test-Path -LiteralPath $default) {
+        return $default
+    }
+    return ''
+}
+
+# Uses cargo when it is installed; otherwise takes binaries that were already built.
+function Build-RustBuddy {
+    $root = $PSScriptRoot
+    $crate = Join-Path $root 'proto\buddy-rs'
+    $release = Join-Path $crate 'target\release'
+    $cargo = Get-Cargo
+    if ($cargo -and (Test-Path -LiteralPath (Join-Path $crate 'Cargo.toml'))) {
+        Push-Location -LiteralPath $crate
+        try {
+            & $cargo build --release --quiet
+            if ($LASTEXITCODE -ne 0) { throw 'Rust 版编译失败' }
+        } finally {
+            Pop-Location
+        }
+    }
+    foreach ($name in @('hook-relay.exe', 'buddy-host.exe')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $release $name))) {
+            throw "找不到 Rust 版 $name。请先安装 Rust（https://rustup.rs），或在 proto\buddy-rs 里运行 cargo build --release。"
+        }
+    }
+    # Hooks keep firing while this runs and may restart the old host right after it is
+    # stopped, so replace the host first and retry; the relay goes last.
+    foreach ($name in @('buddy-host.exe', 'hook-relay.exe')) {
+        for ($attempt = 1; ; $attempt++) {
+            Stop-BuddyHost
+            try {
+                [System.IO.File]::Copy((Join-Path $release $name), (Join-Path $root $name), $true)
+                break
+            } catch {
+                if ($attempt -ge 10) { throw }
+                Start-Sleep -Milliseconds 200
+            }
+        }
     }
 }
 
@@ -327,7 +379,9 @@ if ($Uninstall) {
 }
 
 if ($env:CURSOR_NOTIFY_SKIP_BUILD -ne '1') {
-    if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'HookRelay.cs')) {
+    if ($Engine -eq 'rust') {
+        Build-RustBuddy
+    } elseif (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'HookRelay.cs')) {
         Build-Buddy
     } elseif (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'buddy-host.exe'))) {
         throw "Missing buddy host: $(Join-Path $PSScriptRoot 'buddy-host.exe')"
@@ -377,6 +431,9 @@ Invoke-WithHooksLock {
     Write-HooksConfig $cfg
 }
 Write-Output "安装完成：$hooksFile"
+if ($Engine -eq 'rust') {
+    Write-Output '已安装 Rust 版点点。之后直接双击 install.cmd 会换回 C# 版。'
+}
 if (-not $EnablePermissionHooks) {
     Write-Output '已使用安全模式：不注册会返回 allow 的权限 Hook。若需要实时工具动作，请从 PowerShell 运行 install.ps1 -EnableRealtime。'
 }
