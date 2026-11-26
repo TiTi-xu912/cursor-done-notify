@@ -382,15 +382,16 @@ impl Buddy {
         self.state.order.len() <= 1 && BuddyState::can_jump(self.state.current.as_ref().and_then(|k| self.state.sessions.get(k)))
     }
 
+    /// Whether the pixel under (x, y) is drawn; clicks on empty pixels belong to whatever is below.
+    pub fn opaque_at(&self, x: f32, y: f32) -> bool {
+        if x < 0.0 || y < 0.0 {
+            return false;
+        }
+        self.canvas.pixel(x as u32, y as u32).is_some_and(|p| p.alpha() >= 16)
+    }
+
     fn character_hit(&self, x: f32, y: f32) -> bool {
-        if !self.spot.character.contains(x, y) {
-            return false;
-        }
-        let (px, py) = (x as i32, y as i32);
-        if px < 0 || py < 0 || px >= self.canvas.width() as i32 || py >= self.canvas.height() as i32 {
-            return false;
-        }
-        self.canvas.pixel(px as u32, py as u32).is_some_and(|p| p.alpha() >= 16)
+        self.spot.character.contains(x, y) && self.opaque_at(x, y)
     }
 
     pub fn click(&mut self, x: f32, y: f32) -> Click {

@@ -1,4 +1,5 @@
 use crate::buddy::{Buddy, Click};
+use crate::menu::{self, Action, Entry};
 use crate::lang::t;
 use crate::state::{leaf, BuddyState, Foreground, Session, Settings};
 use crate::Options;
@@ -62,6 +63,7 @@ struct App {
     drag: Option<Drag>,
     visible: bool,
     stay: bool,
+    quit_at: Option<Instant>,
     position_path: PathBuf,
     tray_icon: HICON,
 }
@@ -174,6 +176,7 @@ unsafe fn run_window(opts: Options, state_dir: &std::path::Path) {
             drag: None,
             visible: false,
             stay: opts.stay,
+            quit_at: opts.exit_after.map(|d| Instant::now() + d),
             position_path,
             tray_icon,
         });
@@ -400,6 +403,10 @@ unsafe fn close(hwnd: HWND) {
 }
 
 unsafe fn on_timer(hwnd: HWND) {
+    if with_app(|app| app.quit_at.is_some_and(|at| Instant::now() >= at)).unwrap_or(false) {
+        DestroyWindow(hwnd);
+        return;
+    }
     let tick = with_app(|app| {
         // Hidden between turns (--stay): keep reading the inbox, draw nothing.
         let hidden = app.stay && !app.visible && !app.buddy.has_sessions();
@@ -665,88 +672,39 @@ fn wants_dark(theme: &str) -> bool {
 
 // ---- menu ----
 
-const CMD_MUTE: usize = 1;
-const CMD_QUIET: usize = 2;
-const CMD_QUOTA: usize = 3;
-const CMD_UPDATES: usize = 4;
-const CMD_USAGE_PAGE: usize = 5;
-const CMD_NEW_VERSION: usize = 6;
-const CMD_THEME: usize = 10;
-const CMD_LANGUAGE: usize = 20;
-const CMD_SECONDS: usize = 30;
-const CMD_STALE: usize = 40;
-const CMD_QUIT: usize = 99;
-const THEMES: [&str; 3] = ["auto", "light", "dark"];
-const LANGUAGES: [&str; 3] = ["auto", "zh", "en"];
-const SECONDS: [i64; 4] = [6, 12, 20, 30];
-const STALE: [i64; 4] = [30, 60, 180, 360];
-
-unsafe fn add(menu: HMENU, id: usize, text: &str, checked: bool) {
-    let label = wide(text);
-    AppendMenuW(menu, MF_STRING | if checked { MF_CHECKED } else { 0 }, id, label.as_ptr());
+unsafe fn build_menu(entries: &[Entry]) -> HMENU {
+    let menu = CreatePopupMenu();
+    for entry in entries {
+        match entry {
+            Entry::Item { id, label, checked, enabled, bold } => {
+                let text = wide(label);
+                let mut flags = MF_STRING;
+                if *checked {
+                    flags |= MF_CHECKED;
+                }
+                if !*enabled {
+                    flags |= MF_GRAYED;
+                }
+                AppendMenuW(menu, flags, *id, text.as_ptr());
+                if *bold {
+                    SetMenuDefaultItem(menu, *id as u32, 0);
+                }
+            }
+            Entry::Sub { label, items } => {
+                let text = wide(label);
+                AppendMenuW(menu, MF_POPUP, build_menu(items) as usize, text.as_ptr());
+            }
+            Entry::Separator => {
+                AppendMenuW(menu, MF_SEPARATOR, 0, null());
+            }
+        }
+    }
+    menu
 }
 
 unsafe fn show_menu(hwnd: HWND) {
-    let Some(info) = with_app(|app| {
-        let st = &app.buddy.state;
-        let newer = app.buddy.update.as_ref().filter(|u| st.settings.updates && u.newer()).map(|u| u.tag.clone());
-        (st.settings.clone(), st.done_seconds, st.stale_minutes, app.buddy.has_quota(), newer)
-    }) else {
-        return;
-    };
-    let (s, done_seconds, stale_minutes, has_quota, newer) = info;
-    let menu = CreatePopupMenu();
-    if let Some(tag) = &newer {
-        add(menu, CMD_NEW_VERSION, &t(&format!("发现新版本 {tag}，点这里下载"), &format!("New version {tag} - click to download")), false);
-        SetMenuDefaultItem(menu, CMD_NEW_VERSION as u32, 0);
-    }
-    add(menu, CMD_MUTE, &t("静音", "Mute"), s.mute);
-    add(menu, CMD_QUIET, &t("正看着对话时不打扰", "Stay quiet while I'm watching"), s.quiet);
-    add(menu, CMD_QUOTA, &t("显示额度栏", "Show usage bar"), has_quota && s.quota);
-    if !has_quota {
-        EnableMenuItem(menu, CMD_QUOTA as u32, MF_GRAYED);
-    }
-
-    let theme = CreatePopupMenu();
-    let theme_names = [t("跟随系统", "Follow Windows"), t("浅色", "Light"), t("深色", "Dark")];
-    for (i, name) in theme_names.iter().enumerate() {
-        add(theme, CMD_THEME + i, name, s.theme == THEMES[i]);
-    }
-    let label = wide(&t("主题", "Theme"));
-    AppendMenuW(menu, MF_POPUP, theme as usize, label.as_ptr());
-
-    let seconds = CreatePopupMenu();
-    for (i, n) in SECONDS.iter().enumerate() {
-        add(seconds, CMD_SECONDS + i, &t(&format!("{n} 秒"), &format!("{n} seconds")), done_seconds == *n);
-    }
-    let label = wide(&t("结束后停留", "Stay after finishing"));
-    AppendMenuW(menu, MF_POPUP, seconds as usize, label.as_ptr());
-
-    let stale = CreatePopupMenu();
-    for (i, n) in STALE.iter().enumerate() {
-        let label = if *n < 60 {
-            t(&format!("{n} 分钟"), &format!("{n} minutes"))
-        } else {
-            let hours = n / 60;
-            t(&format!("{hours} 小时"), &format!("{hours} {}", if hours == 1 { "hour" } else { "hours" }))
-        };
-        add(stale, CMD_STALE + i, &label, stale_minutes == *n);
-    }
-    let label = wide(&t("多久没动静算失联", "Treat as lost after"));
-    AppendMenuW(menu, MF_POPUP, stale as usize, label.as_ptr());
-
-    let language = CreatePopupMenu();
-    let language_names = [t("跟随系统", "Follow Windows"), "中文".to_string(), "English".to_string()];
-    for (i, name) in language_names.iter().enumerate() {
-        add(language, CMD_LANGUAGE + i, name, s.language == LANGUAGES[i]);
-    }
-    let label = wide(&t("语言", "Language"));
-    AppendMenuW(menu, MF_POPUP, language as usize, label.as_ptr());
-    add(menu, CMD_UPDATES, &t("自动检查更新", "Check for updates"), s.updates);
-    add(menu, CMD_USAGE_PAGE, &t("打开 Cursor 用量页", "Open Cursor usage page"), false);
-
-    AppendMenuW(menu, MF_SEPARATOR, 0, null());
-    add(menu, CMD_QUIT, &t("先关掉点点", "Close for now"), false);
+    let Some(entries) = with_app(|app| menu::entries(&app.buddy)) else { return };
+    let menu = build_menu(&entries);
 
     let mut cursor = POINT { x: 0, y: 0 };
     GetCursorPos(&mut cursor);
@@ -754,39 +712,20 @@ unsafe fn show_menu(hwnd: HWND) {
     let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, cursor.x, cursor.y, 0, hwnd, null()) as usize;
     DestroyMenu(menu);
 
-    match cmd {
-        CMD_QUIT => {
+    let action = with_app(|app| {
+        let action = menu::apply(&mut app.buddy, cmd);
+        if matches!(action, Action::Changed) {
+            app.buddy.dark = wants_dark(&app.buddy.state.settings.theme);
+        }
+        action
+    });
+    match action {
+        Some(Action::Quit) => {
             DestroyWindow(hwnd);
             return;
         }
-        CMD_USAGE_PAGE => {
-            open_url("https://cursor.com/dashboard?tab=usage");
-            return;
-        }
-        CMD_NEW_VERSION => {
-            if let Some(url) = with_app(|app| app.buddy.update.as_ref().map(|u| u.url.clone())).flatten() {
-                open_url(&url);
-            }
-            return;
-        }
+        Some(Action::Open(url)) => open_url(&url),
         _ => {}
     }
-    with_app(|app| {
-        let st = &mut app.buddy.state.settings;
-        match cmd {
-            CMD_MUTE => st.mute = !st.mute,
-            CMD_QUIET => st.quiet = !st.quiet,
-            CMD_QUOTA => st.quota = !st.quota,
-            CMD_UPDATES => st.updates = !st.updates,
-            c if (CMD_STALE..CMD_STALE + 4).contains(&c) => st.stale_minutes = STALE[c - CMD_STALE],
-            c if (CMD_THEME..CMD_THEME + 3).contains(&c) => st.theme = THEMES[c - CMD_THEME].into(),
-            c if (CMD_LANGUAGE..CMD_LANGUAGE + 3).contains(&c) => st.language = LANGUAGES[c - CMD_LANGUAGE].into(),
-            c if (CMD_SECONDS..CMD_SECONDS + 4).contains(&c) => st.seconds = SECONDS[c - CMD_SECONDS],
-            _ => return,
-        }
-        let theme = st.theme.clone();
-        app.buddy.save_settings();
-        app.buddy.dark = wants_dark(&theme);
-    });
     on_timer(hwnd);
 }

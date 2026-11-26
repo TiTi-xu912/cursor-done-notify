@@ -4,76 +4,111 @@ use std::fs::File;
 use std::path::Path;
 use tiny_skia::Pixmap;
 
+struct Part {
+    font: FontRef<'static>,
+    source: String,
+}
+
 // Fonts are memory-mapped rather than read: msyh.ttc alone is ~19 MB, and mapped pages
 // stay shared and evictable instead of counting as private memory.
+fn map_font(candidates: &[(&str, u32)]) -> Option<Part> {
+    for (path, index) in candidates {
+        if !Path::new(path).exists() {
+            continue;
+        }
+        let Ok(file) = File::open(path) else { continue };
+        let Ok(map) = (unsafe { Mmap::map(&file) }) else { continue };
+        let map: &'static Mmap = Box::leak(Box::new(map));
+        if let Ok(font) = FontRef::try_from_slice_and_index(&map[..], *index) {
+            return Some(Part { font, source: format!("{path}#{index}") });
+        }
+    }
+    None
+}
+
+fn px_scale(font: &FontRef<'static>, em_px: f32) -> PxScale {
+    let upem = font.units_per_em().unwrap_or(1000.0);
+    PxScale::from(em_px * font.height_unscaled() / upem)
+}
+
+/// CJK fonts often carry full-width Latin and punctuation; those come from `latin` instead.
+fn wants_latin(ch: char) -> bool {
+    ch < '\u{2E80}'
+}
+
 pub struct Face {
-    font: FontRef<'static>,
+    main: Part,
+    latin: Option<Part>,
 }
 
 impl Face {
     pub fn open(candidates: &[(&str, u32)]) -> Option<Face> {
-        for (path, index) in candidates {
-            if !Path::new(path).exists() {
-                continue;
-            }
-            let Ok(file) = File::open(path) else { continue };
-            let Ok(map) = (unsafe { Mmap::map(&file) }) else { continue };
-            let map: &'static Mmap = Box::leak(Box::new(map));
-            if let Ok(font) = FontRef::try_from_slice_and_index(&map[..], *index) {
-                return Some(Face { font });
+        Some(Face { main: map_font(candidates)?, latin: None })
+    }
+
+    fn with_latin(mut self, candidates: &[(&str, u32)]) -> Face {
+        self.latin = map_font(candidates);
+        self
+    }
+
+    pub fn describe(&self) -> String {
+        match &self.latin {
+            Some(l) => format!("{} + {}", self.main.source, l.source),
+            None => self.main.source.clone(),
+        }
+    }
+
+    fn pick(&self, ch: char) -> (&FontRef<'static>, GlyphId, bool) {
+        if let Some(latin) = &self.latin {
+            let id = latin.font.glyph_id(ch);
+            if wants_latin(ch) && id.0 != 0 {
+                return (&latin.font, id, true);
             }
         }
-        None
-    }
-
-    fn scale(&self, em_px: f32) -> PxScale {
-        let upem = self.font.units_per_em().unwrap_or(1000.0);
-        PxScale::from(em_px * self.font.height_unscaled() / upem)
-    }
-
-    fn glyph(&self, ch: char) -> GlyphId {
-        self.font.glyph_id(ch)
+        (&self.main.font, self.main.font.glyph_id(ch), false)
     }
 
     pub fn measure(&self, text: &str, em_px: f32) -> f32 {
-        let scaled = self.font.as_scaled(self.scale(em_px));
         let mut width = 0.0;
-        let mut prev: Option<GlyphId> = None;
+        let mut prev: Option<(GlyphId, bool)> = None;
         for ch in text.chars() {
-            let id = self.glyph(ch);
-            if let Some(p) = prev {
+            let (font, id, is_latin) = self.pick(ch);
+            let scaled = font.as_scaled(px_scale(font, em_px));
+            if let Some((p, _)) = prev.filter(|(_, l)| *l == is_latin) {
                 width += scaled.kern(p, id);
             }
             width += scaled.h_advance(id);
-            prev = Some(id);
+            prev = Some((id, is_latin));
         }
         width
     }
 
     pub fn line_height(&self, em_px: f32) -> f32 {
-        let scaled = self.font.as_scaled(self.scale(em_px));
+        let font = &self.main.font;
+        let scaled = font.as_scaled(px_scale(font, em_px));
         scaled.ascent() - scaled.descent() + scaled.line_gap()
     }
 
     /// Draws one line with its top edge at `top`; returns the advance width.
     pub fn draw(&self, pm: &mut Pixmap, text: &str, x: f32, top: f32, em_px: f32, rgba: [u8; 4]) -> f32 {
-        let px_scale = self.scale(em_px);
-        let scaled = self.font.as_scaled(px_scale);
-        let baseline = (top + scaled.ascent()).round();
+        let main = &self.main.font;
+        let baseline = (top + main.as_scaled(px_scale(main, em_px)).ascent()).round();
         let mut caret = x;
-        let mut prev: Option<GlyphId> = None;
+        let mut prev: Option<(GlyphId, bool)> = None;
         let width = pm.width() as i32;
         let height = pm.height() as i32;
         let data = pm.data_mut();
         for ch in text.chars() {
-            let id = self.glyph(ch);
-            if let Some(p) = prev {
+            let (font, id, is_latin) = self.pick(ch);
+            let scale = px_scale(font, em_px);
+            let scaled = font.as_scaled(scale);
+            if let Some((p, _)) = prev.filter(|(_, l)| *l == is_latin) {
                 caret += scaled.kern(p, id);
             }
-            let glyph = id.with_scale_and_position(px_scale, point(caret, baseline));
+            let glyph = id.with_scale_and_position(scale, point(caret, baseline));
             caret += scaled.h_advance(id);
-            prev = Some(id);
-            let Some(outline) = self.font.outline_glyph(glyph) else { continue };
+            prev = Some((id, is_latin));
+            let Some(outline) = font.outline_glyph(glyph) else { continue };
             let bounds = outline.px_bounds();
             outline.draw(|gx, gy, coverage| {
                 let px = bounds.min.x as i32 + gx as i32;
@@ -115,17 +150,27 @@ impl Fonts {
         );
         #[cfg(target_os = "macos")]
         let (regular, bold): (&[(&str, u32)], &[(&str, u32)]) = (
-            &[("/System/Library/Fonts/Hiragino Sans GB.ttc", 0), ("/System/Library/Fonts/STHeiti Light.ttc", 0)],
-            &[("/System/Library/Fonts/Hiragino Sans GB.ttc", 1), ("/System/Library/Fonts/STHeiti Medium.ttc", 0)],
+            &[("/System/Library/Fonts/PingFang.ttc", 0), ("/System/Library/Fonts/STHeiti Light.ttc", 0), ("/System/Library/Fonts/Hiragino Sans GB.ttc", 0)],
+            &[("/System/Library/Fonts/STHeiti Medium.ttc", 0), ("/System/Library/Fonts/Hiragino Sans GB.ttc", 1), ("/System/Library/Fonts/PingFang.ttc", 0)],
         );
         #[cfg(not(any(windows, target_os = "macos")))]
         let (regular, bold): (&[(&str, u32)], &[(&str, u32)]) = (
             &[("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2)],
             &[("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 2)],
         );
-        let bold = Face::open(bold).or_else(|| Face::open(regular))?;
-        let regular = Face::open(regular)?;
+        // Microsoft YaHei's own Latin is fine; Mac CJK fonts set it too wide.
+        #[cfg(target_os = "macos")]
+        let (latin, latin_bold): (&[(&str, u32)], &[(&str, u32)]) =
+            (&[("/System/Library/Fonts/Helvetica.ttc", 0)], &[("/System/Library/Fonts/Helvetica.ttc", 1)]);
+        #[cfg(not(target_os = "macos"))]
+        let (latin, latin_bold): (&[(&str, u32)], &[(&str, u32)]) = (&[], &[]);
+        let bold = Face::open(bold).or_else(|| Face::open(regular))?.with_latin(latin_bold);
+        let regular = Face::open(regular)?.with_latin(latin);
         Some(Fonts { regular, bold })
+    }
+
+    pub fn describe(&self) -> String {
+        format!("regular: {}\nbold: {}", self.regular.describe(), self.bold.describe())
     }
 }
 

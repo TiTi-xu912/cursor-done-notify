@@ -462,6 +462,11 @@ impl BuddyState {
         if name.is_empty() {
             return false;
         }
+        // macOS only reveals window titles with Screen Recording permission; without one,
+        // Cursor being in front is the best signal there is.
+        if fg.process == "Cursor" && fg.title.is_empty() {
+            return true;
+        }
         fg.process == "Cursor" && fg.title.to_lowercase().contains(&name.to_lowercase())
     }
 
