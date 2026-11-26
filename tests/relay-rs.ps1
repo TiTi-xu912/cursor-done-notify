@@ -89,7 +89,16 @@ try {
     & (Join-Path $installRoot 'install.ps1') -Engine rust | Out-Null
     $hooks = Get-Content -LiteralPath (Join-Path $fakeHome '.cursor\hooks.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $stop = @($hooks.hooks.stop | ForEach-Object { [string]$_.command })
-    $expected = "& '$(Join-Path $installRoot 'hook-relay.exe')' empty"
+    # The installer writes the long path; CI runners hand out an 8.3 TEMP like RUNNER~1.
+    if (-not ('CursorDoneNotify.LongPath' -as [type])) {
+        Add-Type -Namespace CursorDoneNotify -Name LongPath -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+public static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint bufferLength);
+'@
+    }
+    $buffer = New-Object System.Text.StringBuilder 1024
+    [void][CursorDoneNotify.LongPath]::GetLongPathName($installRoot, $buffer, [uint32]$buffer.Capacity)
+    $expected = "& '$(Join-Path $buffer.ToString() 'hook-relay.exe')' empty"
     if (@($stop | Where-Object { $_ -eq $expected }).Count -ne 1) { throw "rust install hook: $($stop -join ' | ')" }
     foreach ($name in @('hook-relay.exe', 'buddy-host.exe')) {
         $want = (Get-FileHash -LiteralPath (Join-Path $release $name)).Hash
