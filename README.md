@@ -75,6 +75,38 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnableRealtim
 
 更新配置前会在同目录保留一份 `hooks.json.bak`；写入使用临时文件替换，避免中途退出损坏配置。
 
+### Rust 版（预览）
+
+`proto/buddy-rs` 里是用 Rust 重写的同一套程序，功能和行为与默认版本一致，常驻内存约 16 MB（默认版本约 60 MB），中继每次调用也更快。它也是以后支持 macOS 的基础。
+
+- 用 zip 安装：下载 Releases 里名字带 `-rust` 的 zip，解压后双击 `install.cmd`，不需要装 Rust。
+- 用 git 安装：装好 [Rust](https://rustup.rs) 后运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Engine rust`（实时模式再加 `-EnableRealtime`）。
+
+两个版本读写同一份设置、缓存和收件箱，可以随时切换；在 git 目录里直接双击 `install.cmd` 会换回默认版本。
+
+### macOS（预览）
+
+Rust 版也能在 macOS 11 或更新版本上运行，Apple 芯片和 Intel 都支持。目前只在 CI 的 Mac 机器上自动测试过（启动、跟着一轮对话走、安装和卸载），还没有在真机上手动用过。
+
+1. 下载 Releases 里名字带 `-macos` 的 zip，解压到一个打算一直留着的目录。
+2. 在「终端」里运行：
+
+   ```bash
+   bash ~/路径/cursor-done-notify-v1.2.0-macos/install.sh
+   ```
+
+   需要实时动作时加上 `--realtime`。用 git 的话，装好 [Rust](https://rustup.rs) 后在仓库里运行 `bash install.sh`，它会先编译。
+3. 完全退出 Cursor 再打开。
+
+程序没有用 Apple 开发者证书签名。`install.sh` 会去掉下载带来的隔离标记，这样 Gatekeeper 不会拦它；如果你更想手动处理，也可以在「系统设置 → 隐私与安全性」里选择仍要打开。卸载运行同一目录下的 `uninstall.sh`。
+
+和 Windows 版的差别：
+
+- 托盘图标在屏幕顶部的菜单栏里，点它打开菜单；在点点身上点右键也有同样的菜单。
+- 点标题跳回对话时，会用 `open -a Cursor <项目目录>` 把对应的 Cursor 窗口调到前面。终端里跑的 Cursor CLI 暂时跳不回去。
+- 「正看着对话时不打扰」：macOS 不给普通程序读取别的窗口标题，所以只要 Cursor 在最前面就算你在看，不区分是哪个项目的窗口。
+- 新版本提示只出现在菜单最上面，不弹系统通知。
+
 ## 使用
 
 - 拖动窗口可以搬家，松手后位置会记住。
@@ -158,6 +190,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\hooks.ps1
 ```
 
 改完任何 `.cs` 文件后，再运行一次 `install.cmd`。
+
+Rust 版的测试在 `proto/buddy-rs` 里运行 `cargo test`（状态机、额度、更新检查和中继），中继和安装的端到端检查是 `tests\relay-rs.ps1`。`buddy-host.exe --snapshot <目录>` 会把几种典型画面画成 PNG，不打开窗口。
 
 发布新版本：先把 `Host.cs` 里的 `AppInfo.Version` 改成新版本号并提交，再推送同名 tag（比如 `v1.2.0`）。`.github/workflows/release.yml` 会跑测试，用 `tools/package.ps1` 编译并打包，然后创建 Release。tag 和代码里的版本号对不上时打包会失败。本地也可以直接运行 `tools\package.ps1`，zip 写在 `dist` 目录。编译产物 `hook-relay.exe` 和 `buddy-host.exe` 不进版本库。
 

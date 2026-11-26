@@ -4,6 +4,7 @@ buddy-host.exe
 BuddyForm.dll
 sprites-contact.png
 dist/
+proto/*/target/
 
 .vs/
 *.user

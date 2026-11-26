@@ -24,3 +24,55 @@ jobs:
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\package.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: proto/buddy-rs
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Unit tests (state machine, quota, updates, relay)
+        run: cargo test
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Relay and installer checks
+        if: runner.os == 'Windows'
+        shell: powershell
+        working-directory: .
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\relay-rs.ps1 -Relay .\proto\buddy-rs\target\release\hook-relay.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Render snapshots
+        if: runner.os == 'macOS'
+        run: ./target/release/buddy-host --snapshot "$RUNNER_TEMP/snapshots"
+
+      - name: Window smoke test (start, feed a turn, screenshot, memory)
+        if: runner.os == 'macOS'
+        working-directory: .
+        run: bash tests/smoke-mac.sh "$RUNNER_TEMP/snapshots"
+
+      - name: Universal package, then install / hook / uninstall from it
+        if: runner.os == 'macOS'
+        working-directory: .
+        run: |
+          set -o pipefail
+          zip="$(bash tools/package-mac.sh | tail -1)"
+          bash tests/install-mac.sh "$zip"
+          cp "$zip" "$RUNNER_TEMP/snapshots/"
+          lipo -archs "dist/$(basename "$zip" .zip)/buddy-host"
+
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'macOS'
+        with:
+          name: macos-snapshots
+          path: ${{ runner.temp }}/snapshots

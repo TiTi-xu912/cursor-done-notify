@@ -11,7 +11,7 @@ namespace CursorDoneBuddy
 {
     public static class AppInfo
     {
-        public const string Version = "1.1.0";
+        public const string Version = "1.2.0";
         public const string Repository = "TiTi-xu912/cursor-done-notify";
     }
 

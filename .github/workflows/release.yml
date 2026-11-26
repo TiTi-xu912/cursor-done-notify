@@ -19,6 +19,10 @@ jobs:
         shell: powershell
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\hooks.ps1
+          Push-Location proto\buddy-rs
+          cargo test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
 
       - name: Package
         shell: powershell
@@ -27,6 +31,10 @@ jobs:
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\package.ps1 -Version $env:TAG
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\package.ps1 -Version $env:TAG -Engine rust
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\relay-rs.ps1 -Relay ".\dist\cursor-done-notify-$($env:TAG)-rust\hook-relay.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish
         shell: powershell
@@ -34,5 +42,28 @@ jobs:
           TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          $zip = Get-ChildItem -LiteralPath dist -Filter '*.zip' | Select-Object -First 1
-          gh release create $env:TAG $zip.FullName --title $env:TAG --generate-notes
+          $zips = @(Get-ChildItem -LiteralPath dist -Filter '*.zip' | ForEach-Object { $_.FullName })
+          gh release create $env:TAG @zips --title $env:TAG --generate-notes
+
+  macos:
+    needs: release
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Test, package and check the install
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -o pipefail
+          (cd proto/buddy-rs && cargo test)
+          zip="$(bash tools/package-mac.sh "$TAG" | tail -1)"
+          bash tests/install-mac.sh "$zip"
+          echo "ZIP=$zip" >> "$GITHUB_ENV"
+
+      - name: Upload to the release
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ZIP"
