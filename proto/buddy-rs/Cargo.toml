@@ -18,7 +18,7 @@ path = "src/relay.rs"
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd", "png-format"] }
 ab_glyph = "0.2"
 memmap2 = "0.9"
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

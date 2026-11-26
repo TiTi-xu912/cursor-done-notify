@@ -96,6 +96,8 @@ pub fn run(opts: Options) {
     let state_dir = crate::state_dir();
     let _ = std::fs::create_dir_all(state_dir.join("inbox"));
     let Some(lock) = take_lock(&state_dir) else { return };
+    // --uninstall reads this to stop the running host.
+    let _ = std::fs::write(state_dir.join("host.pid"), std::process::id().to_string());
 
     let mut buddy = match Buddy::new(1.0, &state_dir, Settings::default_path()) {
         Ok(b) => b,

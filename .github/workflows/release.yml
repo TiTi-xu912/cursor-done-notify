@@ -44,3 +44,25 @@ jobs:
         run: |
           $zips = @(Get-ChildItem -LiteralPath dist -Filter '*.zip' | ForEach-Object { $_.FullName })
           gh release create $env:TAG @zips --title $env:TAG --generate-notes
+
+  macos:
+    needs: release
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Test, package and check the install
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          (cd proto/buddy-rs && cargo test)
+          zip="$(bash tools/package-mac.sh "$TAG" | tail -1)"
+          bash tests/install-mac.sh "$zip"
+          echo "ZIP=$zip" >> "$GITHUB_ENV"
+
+      - name: Upload to the release
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$ZIP"

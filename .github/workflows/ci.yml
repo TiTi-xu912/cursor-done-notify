@@ -61,6 +61,15 @@ jobs:
         working-directory: .
         run: bash tests/smoke-mac.sh "$RUNNER_TEMP/snapshots"
 
+      - name: Universal package, then install / hook / uninstall from it
+        if: runner.os == 'macOS'
+        working-directory: .
+        run: |
+          zip="$(bash tools/package-mac.sh | tail -1)"
+          bash tests/install-mac.sh "$zip"
+          cp "$zip" "$RUNNER_TEMP/snapshots/"
+          lipo -archs "dist/$(basename "$zip" .zip)/buddy-host"
+
       - uses: actions/upload-artifact@v4
         if: always() && runner.os == 'macOS'
         with:

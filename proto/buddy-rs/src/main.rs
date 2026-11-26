@@ -5,6 +5,7 @@
 mod buddy;
 mod clock;
 mod event;
+mod install;
 mod jsonscan;
 mod lang;
 #[cfg(target_os = "macos")]
@@ -38,6 +39,18 @@ pub fn state_dir() -> PathBuf {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    if has("--install") || has("--uninstall") {
+        let result = if has("--install") { install::run_install(has("--realtime")) } else { install::run_uninstall() };
+        match result {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if args.iter().any(|a| a == "--fonts") {
         match text::Fonts::load() {
             Some(fonts) => println!("{}", fonts.describe()),

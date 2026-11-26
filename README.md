@@ -84,6 +84,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnableRealtim
 
 两个版本读写同一份设置、缓存和收件箱，可以随时切换；在 git 目录里直接双击 `install.cmd` 会换回默认版本。
 
+### macOS（预览）
+
+Rust 版也能在 macOS 11 或更新版本上运行，Apple 芯片和 Intel 都支持。目前只在 CI 的 Mac 机器上自动测试过（启动、跟着一轮对话走、安装和卸载），还没有在真机上手动用过。
+
+1. 下载 Releases 里名字带 `-macos` 的 zip，解压到一个打算一直留着的目录。
+2. 在「终端」里运行：
+
+   ```bash
+   bash ~/路径/cursor-done-notify-v1.1.0-macos/install.sh
+   ```
+
+   需要实时动作时加上 `--realtime`。用 git 的话，装好 [Rust](https://rustup.rs) 后在仓库里运行 `bash install.sh`，它会先编译。
+3. 完全退出 Cursor 再打开。
+
+程序没有用 Apple 开发者证书签名。`install.sh` 会去掉下载带来的隔离标记，这样 Gatekeeper 不会拦它；如果你更想手动处理，也可以在「系统设置 → 隐私与安全性」里选择仍要打开。卸载运行同一目录下的 `uninstall.sh`。
+
+和 Windows 版的差别：
+
+- 托盘图标在屏幕顶部的菜单栏里，点它打开菜单；在点点身上点右键也有同样的菜单。
+- 点标题跳回对话时，会用 `open -a Cursor <项目目录>` 把对应的 Cursor 窗口调到前面。终端里跑的 Cursor CLI 暂时跳不回去。
+- 「正看着对话时不打扰」：macOS 不给普通程序读取别的窗口标题，所以只要 Cursor 在最前面就算你在看，不区分是哪个项目的窗口。
+- 新版本提示只出现在菜单最上面，不弹系统通知。
+
 ## 使用
 
 - 拖动窗口可以搬家，松手后位置会记住。
