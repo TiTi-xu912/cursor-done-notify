@@ -92,7 +92,7 @@ Rust 版也能在 macOS 11 或更新版本上运行，Apple 芯片和 Intel 都�
 2. 在「终端」里运行：
 
    ```bash
-   bash ~/路径/cursor-done-notify-v1.1.0-macos/install.sh
+   bash ~/路径/cursor-done-notify-v1.2.0-macos/install.sh
    ```
 
    需要实时动作时加上 `--realtime`。用 git 的话，装好 [Rust](https://rustup.rs) 后在仓库里运行 `bash install.sh`，它会先编译。
