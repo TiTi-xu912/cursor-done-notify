@@ -5,8 +5,9 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 crate="$root/proto/buddy-rs"
 
-version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$crate/Cargo.toml" | head -1)"
-host_version="$(sed -n 's/.*public const string Version = "\(.*\)";.*/\1/p' "$root/Host.cs" | head -1)"
+# The checkout uses CRLF for text files, so drop the carriage returns before matching.
+version="$(tr -d '\r' < "$crate/Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+host_version="$(tr -d '\r' < "$root/Host.cs" | sed -n 's/.*public const string Version = "\(.*\)";.*/\1/p' | head -1)"
 if [ "$version" != "$host_version" ]; then
     echo "Cargo.toml version $version does not match AppInfo.Version $host_version in Host.cs" >&2
     exit 1

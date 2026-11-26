@@ -65,6 +65,7 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: .
         run: |
+          set -o pipefail
           zip="$(bash tools/package-mac.sh | tail -1)"
           bash tests/install-mac.sh "$zip"
           cp "$zip" "$RUNNER_TEMP/snapshots/"
